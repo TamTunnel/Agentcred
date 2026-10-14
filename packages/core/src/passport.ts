@@ -162,27 +162,39 @@ export function issuePassport(args: IssuePassportArgs): IssuedPassport {
 }
 
 /** Decode a passport envelope without verifying signatures. */
-export function inspectPassport(passport: string): PassportEnvelope & { chain: unknown[] } {
-  const envelope = parseEnvelope(passport);
-  const chain: unknown[] = [];
-  let token: string | undefined = envelope.leaf;
-  for (let depth = 0; depth <= 8 && token; depth++) {
-    const payload = decodePayload(token);
-    chain.push({
-      depth,
-      iss: payload.iss,
-      iss_fingerprint: fingerprint(String(payload.iss)),
-      sub: payload.sub,
-      aud: payload.aud,
-      jti: payload.jti,
-      scope: payload.claims?.scope,
-      amount_limit: payload.claims?.amount_limit,
-      exp: payload.exp ? new Date(payload.exp * 1000).toISOString() : null,
-    });
-    token = payload.grant;
-    if (payload.aud === "sovereign-identity/agency") break;
+export type InspectPassportResult =
+  | ({ ok: true } & PassportEnvelope & { chain: unknown[] })
+  | { ok: false; reason: string };
+
+export function inspectPassport(passport: string): InspectPassportResult {
+  try {
+    const envelope = parseEnvelope(passport);
+    const chain: unknown[] = [];
+    let token: string | undefined = envelope.leaf;
+    for (let depth = 0; depth <= 8 && token; depth++) {
+      const payload = decodePayload(token);
+      chain.push({
+        depth,
+        iss: payload.iss,
+        iss_fingerprint: fingerprint(String(payload.iss)),
+        sub: payload.sub,
+        aud: payload.aud,
+        jti: payload.jti,
+        scope: payload.claims?.scope,
+        amount_limit: payload.claims?.amount_limit,
+        exp: payload.exp ? new Date(payload.exp * 1000).toISOString() : null,
+      });
+      token = payload.grant;
+      if (payload.aud === "sovereign-identity/agency") break;
+    }
+    return { ok: true, ...envelope, chain };
+  } catch (e) {
+    // Like verifyPassport, inspection fails closed on garbage instead of
+    // throwing — callers get a result they can log and decline.
+    const reason =
+      e instanceof WalletError ? e.message : "inspection error: " + (e as Error).message;
+    return { ok: false, reason };
   }
-  return { ...envelope, chain };
 }
 
 // --------------------------------------------------------------- verification
@@ -194,6 +206,13 @@ export interface VerifyPolicy {
   allowedActions?: string[];
   /** Leaf amount_limit must be ≤ this. */
   maxAmount?: number;
+  /**
+   * ISO 4217 currency codes the merchant accepts (case-insensitive).
+   * When set, a passport whose currency is not on the list is rejected —
+   * fail closed. When unset, no currency gate is applied (the leaf's signed
+   * currency is still bound to the envelope's spend.currency).
+   */
+  allowedCurrencies?: string[];
   /** Leaf ttl (exp - iat) must be ≤ this many seconds. */
   maxTtlSec?: number;
   /** DIDs permitted to publish revocation lists. Defaults to [root owner]. */
@@ -377,6 +396,17 @@ export function verifyPassport(
       return fail(
         `amount ${spend.amount_limit} exceeds merchant policy max ${policy.maxAmount}`
       );
+    }
+    // Currency allowlist: fail closed on mismatch when the merchant set it.
+    // Entries are normalized to ISO 4217 (invalid config entries fail the
+    // verification rather than being silently skipped).
+    if (policy.allowedCurrencies !== undefined) {
+      const allowed = policy.allowedCurrencies.map((c) => normalizeCurrency(c));
+      if (!allowed.includes(spend.currency)) {
+        return fail(
+          `currency ${spend.currency} not allowed by merchant policy (allowed: ${allowed.join(", ") || "none"})`
+        );
+      }
     }
     if (
       policy.maxTtlSec !== undefined &&

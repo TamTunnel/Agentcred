@@ -212,15 +212,58 @@ describe("currency threading (Blocker 1)", () => {
     return JSON.parse(Buffer.from(mandate.split(".")[1], "base64url").toString("utf8")).claims;
   }
 
-  it("mintMandate normalizes and signs the requested currency", () => {
+  function grantClaims(grant: string): Record<string, any> {
+    return JSON.parse(Buffer.from(grant.split(".")[1], "base64url").toString("utf8")).claims;
+  }
+
+  it("mintMandate normalizes and signs the requested currency on a matching grant", () => {
+    const eurGrant = issueGrant({
+      agentDid,
+      scope: ["purchase"],
+      amountLimit: 100,
+      ttlDays: 30,
+      currency: "EUR",
+    }).grant;
     const m = mintMandate({
       audience: "merchant:x.example.invalid",
       scope: ["purchase"],
       amount: 10,
       currency: "eur",
-      grantJws,
+      grantJws: eurGrant,
     });
     assert.equal(leafClaims(m.mandate).currency, "EUR");
+  });
+
+  it("mintMandate refuses a leaf currency the grant does not cover (BREAK-2)", () => {
+    // Grants are denominated; a USD grant cannot mint a EUR leaf.
+    assert.throws(
+      () =>
+        mintMandate({
+          audience: "merchant:x.example.invalid",
+          scope: ["purchase"],
+          amount: 10,
+          currency: "EUR",
+          grantJws, // USD-denominated grant
+        }),
+      (e: unknown) => e instanceof WalletError && e.code === "currency_exceeded"
+    );
+  });
+
+  it("issueGrant denominates the grant in the requested currency (default USD)", () => {
+    const g = issueGrant({ agentDid, scope: ["purchase"], amountLimit: 100, ttlDays: 30 });
+    assert.equal(grantClaims(g.grant).currency, "USD");
+    const eurg = issueGrant({
+      agentDid,
+      scope: ["purchase"],
+      amountLimit: 100,
+      ttlDays: 30,
+      currency: "eur",
+    });
+    assert.equal(grantClaims(eurg.grant).currency, "EUR");
+    assert.throws(
+      () => issueGrant({ agentDid, scope: ["purchase"], amountLimit: 100, currency: "USDD" }),
+      /currency/i
+    );
   });
 
   it("mintMandate defaults currency to USD", () => {

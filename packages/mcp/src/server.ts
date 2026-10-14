@@ -97,6 +97,8 @@ function makeServer() {
         merchantId: z.string().describe("This merchant's own identifier (aud binding)"),
         allowedActions: z.array(z.string()).optional(),
         maxAmount: z.number().nonnegative().optional(),
+        allowedCurrencies: z.array(z.string()).optional()
+          .describe("ISO 4217 codes the merchant accepts (e.g. [\"USD\"]); mismatch fails closed"),
         maxTtlSec: z.number().int().positive().optional(),
         trustedRevokers: z.array(z.string()).optional()
           .describe("DIDs allowed to publish revocation lists (default: the passport's root owner)"),

@@ -119,10 +119,14 @@ export class RevocationCache {
     const all = this.loadAll();
     const prev = all[payload.iss];
     if (prev) {
-      // Only replace with a newer sequence; never downgrade.
+      // Only replace with a newer sequence; never downgrade. And only a
+      // previous list from the SAME issuer counts: a planted entry (file
+      // key matches but payload.iss doesn't) can neither contribute its
+      // sequence nor block the real issuer's update.
       try {
         const prevPayload = verifySignature(prev.jws);
-        if (payload.seq <= prevPayload.seq) return prevPayload;
+        if (prevPayload.iss === payload.iss && payload.seq <= prevPayload.seq)
+          return prevPayload;
       } catch {
         /* corrupt cache entry: replace it */
       }
@@ -145,6 +149,12 @@ export class RevocationCache {
     if (!entry) return null;
     try {
       const payload = verifySignature(entry.jws);
+      // The file key is attacker-controlled storage: trust only the
+      // signature-verified issuer, and reject key/payload mismatches.
+      // A planted entry (someone else's CRL stored under this key) yields
+      // no info rather than poisoning enforcement.
+      if (payload.iss !== iss) return null;
+      if (!this.trustedIssuers.has(payload.iss)) return null;
       const now = Math.floor(Date.now() / 1000);
       return {
         seq: payload.seq,
@@ -161,14 +171,20 @@ export class RevocationCache {
    * All revoked jtis from signature-valid cached lists of trusted issuers —
    * regardless of list expiry. A revoked jti stays revoked until a newer
    * list says otherwise; an expired list never silently un-revokes history.
+   *
+   * Trust is anchored on the SIGNATURE-VERIFIED payload.iss, never the file
+   * key: revocation.json is local storage an attacker can plant entries in,
+   * so an entry whose verified issuer is untrusted — or whose file key does
+   * not match the verified issuer — is ignored instead of being honored.
    */
   revokedJtis(verifySignature: (jws: string) => RevocationListPayload): Set<string> {
     const out = new Set<string>();
     const all = this.loadAll();
-    for (const [iss, entry] of Object.entries(all)) {
-      if (!this.trustedIssuers.has(iss)) continue;
+    for (const [fileKey, entry] of Object.entries(all)) {
       try {
         const payload = verifySignature(entry.jws);
+        if (payload.iss !== fileKey) continue; // planted/misfiled entry
+        if (!this.trustedIssuers.has(payload.iss)) continue;
         for (const jti of payload.revoked || []) out.add(jti);
       } catch {
         continue; // corrupt entry: ignore, never fail open

@@ -39,7 +39,8 @@ Usage:
   agentcred issue --merchant ID --amount-limit N --actions A[,A] --grant FILE|JWS
                   [--ttl-sec S] [--task T] [--currency USD] [--confirm-over-limit]
   agentcred verify --passport FILE|JSON --merchant ID [--max-amount N]
-                   [--allowed-actions A[,A]] [--max-ttl-sec S] [--state-dir D]
+                   [--allowed-actions A[,A]] [--allowed-currencies C[,C]]
+                   [--max-ttl-sec S] [--state-dir D]
   agentcred inspect --passport FILE|JSON      decode without verifying
   agentcred revoke --jti JTI [--ttl-days D] [--state-dir D]
                    owner revokes a jti (signed CRL, default 366-day list)
@@ -143,10 +144,14 @@ async function main(): Promise<void> {
         const allowed = opts["allowed-actions"]
           ? String(opts["allowed-actions"]).split(",").map((s) => s.trim()).filter(Boolean)
           : undefined;
+        const allowedCurrencies = opts["allowed-currencies"]
+          ? String(opts["allowed-currencies"]).split(",").map((s) => s.trim()).filter(Boolean)
+          : undefined;
         const res = verifyPassport(readMaybeFile(need(opts, "passport")), {
           merchantId: need(opts, "merchant"),
           allowedActions: allowed,
           maxAmount: opts["max-amount"] !== undefined ? Number(opts["max-amount"]) : undefined,
+          allowedCurrencies,
           maxTtlSec: opts["max-ttl-sec"] !== undefined ? Number(opts["max-ttl-sec"]) : undefined,
           stateDir: (opts["state-dir"] as string) || undefined,
         });
@@ -155,7 +160,9 @@ async function main(): Promise<void> {
         break;
       }
       case "inspect": {
-        out({ ok: true, ...inspectPassport(readMaybeFile(need(opts, "passport"))) });
+        const res = inspectPassport(readMaybeFile(need(opts, "passport")));
+        out(res);
+        if (!res.ok) process.exitCode = 1;
         break;
       }
       case "revoke": {

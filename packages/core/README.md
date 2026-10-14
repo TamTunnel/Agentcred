@@ -19,10 +19,13 @@ const res = verifyPassport(passport, {
   merchantId: "merchant:acme.example.invalid",
   allowedActions: ["purchase"],
   maxAmount: 50,
+  allowedCurrencies: ["USD"], // fail closed on any other currency
   maxTtlSec: 1800,
 });
 // res.ok === true → { agent, owner, actions, amount_limit, expires, ... }
 // res.ok === false → { reason }
+// NOTE: ok:true is not "charge this card" — bind res.owner to a customer
+// account you recognize (self-issued passports verify by design).
 ```
 
 The envelope is canonical JSON — `{ leaf, leaf_sha256, spend, v }` — and verifiers reject any non-canonical encoding. See the repo README for the full check list.

@@ -25,6 +25,7 @@ import { mintMandate } from "@tamtunnel/si-wallet-core";
 let env: TestEnv;
 let agentDid: string;
 let grantJws: string;
+let eurGrantJws: string;
 const MERCHANT = "merchant:acme.example.invalid";
 
 before(() => {
@@ -37,6 +38,13 @@ before(() => {
     scope: ["purchase", "refund"],
     amountLimit: 100,
     ttlDays: 30,
+  }).grant;
+  eurGrantJws = issueGrant({
+    agentDid,
+    scope: ["purchase", "refund"],
+    amountLimit: 100,
+    ttlDays: 30,
+    currency: "EUR",
   }).grant;
 });
 
@@ -75,6 +83,8 @@ describe("passport happy path", () => {
   it("inspectPassport decodes the chain without verifying", () => {
     const issued = issueTestPassport();
     const decoded = inspectPassport(issued.passport);
+    assert.equal(decoded.ok, true);
+    if (!decoded.ok) throw new Error("unreachable");
     assert.equal(decoded.v, 1);
     assert.equal(decoded.spend.merchant, MERCHANT);
     assert.ok(Array.isArray(decoded.chain));
@@ -399,7 +409,8 @@ describe("currency binding (Blocker 1)", () => {
   });
 
   it("normalizes currency at issuance and threads it into the signed leaf", () => {
-    const issued = issueTestPassport({ currency: "eur" });
+    // A EUR leaf needs a EUR-denominated grant (see BREAK-2 currency confinement).
+    const issued = issueTestPassport({ currency: "eur", grantJws: eurGrantJws });
     const parsed = JSON.parse(issued.passport);
     assert.equal(parsed.spend.currency, "EUR");
     const leafPayload = JSON.parse(
@@ -413,6 +424,95 @@ describe("currency binding (Blocker 1)", () => {
     assert.throws(() => issueTestPassport({ currency: "USDD" }), /currency/i);
     assert.throws(() => issueTestPassport({ currency: "12" }), /currency/i);
     assert.throws(() => issueTestPassport({ currency: "US$" }), /currency/i);
+  });
+});
+
+describe("currency policy + mint-time confinement (adversarial judge BREAK-2)", () => {
+  it("mint-time: a USD grant cannot mint a EUR leaf", () => {
+    // The judge's PoC: grant is USD-only, agent issues a EUR passport.
+    assert.throws(
+      () => issueTestPassport({ currency: "EUR", grantJws }),
+      (e: unknown) => e instanceof WalletError && e.code === "currency_exceeded"
+    );
+  });
+
+  it("mint-time: a EUR grant mints a EUR leaf", () => {
+    const issued = issueTestPassport({ currency: "EUR", grantJws: eurGrantJws });
+    assert.equal(verifyPassport(issued.passport, policy()).ok, true);
+  });
+
+  it("policy: EUR passport against a USD-only merchant policy is rejected", () => {
+    const issued = issueTestPassport({ currency: "EUR", grantJws: eurGrantJws });
+    const res = verifyPassport(issued.passport, policy({ allowedCurrencies: ["USD"] }));
+    assert.equal(res.ok, false);
+    assert.match(res.reason || "", /currency/i);
+  });
+
+  it("policy: a rejected-on-currency passport is not consumed and can be re-presented", () => {
+    const issued = issueTestPassport({ currency: "EUR", grantJws: eurGrantJws });
+    const denied = verifyPassport(issued.passport, policy({ allowedCurrencies: ["USD"] }));
+    assert.equal(denied.ok, false);
+    // Policy fixed to allow EUR: the same passport verifies — nothing burned.
+    const accepted = verifyPassport(
+      issued.passport,
+      policy({ allowedCurrencies: ["USD", "EUR"] })
+    );
+    assert.equal(accepted.ok, true);
+    assert.equal(accepted.currency, "EUR");
+  });
+
+  it("policy: allowedCurrencies is case-insensitive; unset means no currency gate", () => {
+    const usd = issueTestPassport();
+    assert.equal(verifyPassport(usd.passport, policy({ allowedCurrencies: ["usd"] })).ok, true);
+    const eur = issueTestPassport({ currency: "EUR", grantJws: eurGrantJws });
+    // No allowedCurrencies knob set: currency gate is off (backwards compatible).
+    assert.equal(verifyPassport(eur.passport, policy()).ok, true);
+  });
+});
+
+describe("planted CRL end-to-end (adversarial judge BREAK-1)", () => {
+  it("verifyPassport stays ok when an attacker CRL is planted under the owner's file key", () => {
+    const dir = env.stateDir + "-planted-e2e";
+    const issued = issueTestPassport();
+    const leafPayload = JSON.parse(
+      Buffer.from(JSON.parse(issued.passport).leaf.split(".")[1], "base64url").toString("utf8")
+    );
+    const owner = getDid("owner");
+    const attacker = getDid("agent");
+    const now = Math.floor(Date.now() / 1000);
+    // Attacker (as their own DID) signs a CRL covering the victim's leaf jti
+    // and plants it under the REAL owner's file key in revocation.json.
+    const planted = signJwsWithRole(
+      { iss: attacker.did, iat: now, exp: now + 86400, revoked: [String(leafPayload.jti)], seq: 1 },
+      "agent"
+    );
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, "revocation.json"),
+      JSON.stringify({ [owner.did]: { jws: planted, fetchedAt: now } }),
+      { mode: 0o600 }
+    );
+    const res = verifyPassport(issued.passport, policy({ stateDir: dir }));
+    assert.equal(res.ok, true);
+  });
+});
+
+describe("inspectPassport failure result (judge note N6)", () => {
+  it("returns {ok:false} instead of throwing on garbage", () => {
+    for (const bad of ["", "not json", "{}", "[]", "null"]) {
+      const res = inspectPassport(bad);
+      assert.equal(res.ok, false, `expected failure for ${JSON.stringify(bad)}`);
+      assert.ok(typeof (res as { reason?: string }).reason === "string");
+    }
+  });
+
+  it("returns {ok:true, ...envelope, chain} on a valid passport", () => {
+    const issued = issueTestPassport();
+    const res = inspectPassport(issued.passport);
+    assert.equal(res.ok, true);
+    if (!res.ok) throw new Error("unreachable");
+    assert.ok(res.chain.length >= 2);
+    assert.equal(res.v, 1);
   });
 });
 

@@ -58,15 +58,34 @@ app.post("/checkout",
     merchantId: "merchant:acme.example.invalid",
     allowedActions: ["purchase"],
     maxAmount: 50,
+    allowedCurrencies: ["USD"],   // reject passports in any other currency, fail closed
     maxTtlSec: 1800,
   }),
   (req, res) => {
-    // req.agentcred = { agent, owner, actions, amount_limit, expires, ... }
-    res.json({ ok: true, charged: req.agentcred.amount_limit });
+    // req.agentcred = { agent, owner, actions, amount_limit, currency, expires, ... }
+    // The passport is cryptographically valid here — but that is not enough.
+    // A self-issued passport (attacker as their own owner AND agent) verifies
+    // ok:true by design: the signatures really do check out. The merchant must
+    // bind `owner` to a customer account it recognizes.
+    const customer = lookupCustomerByAgentCredOwner(req.agentcred.owner);
+    if (!customer) {
+      return res.status(402).json({ ok: false, reason: "unknown AgentCred owner" });
+    }
+    res.json({ ok: true, charged: req.agentcred.amount_limit, currency: req.agentcred.currency });
   });
 ```
 
 The agent sends `Authorization: Passport <canonical-json>` (or a `passport` field in the JSON body). Fastify and Hono adapters ship in the same package; the core `verifyPassport()` is pure and dependency-free.
+
+#### Merchant integration checklist
+
+`verifyPassport` returning `ok: true` means *the cryptography checks out and the merchant policy passed* — it does **not** mean "charge this card". Before you fulfill:
+
+1. **Check `result.owner` against your customer registry.** Self-issued passports (attacker as their own owner and agent) verify `ok: true` by design — the signatures are real. Only fulfill for owners you recognize, and charge the matching customer account.
+2. **Set `allowedCurrencies`.** Without it, any ISO-4217 currency the grant covers verifies. List exactly the currencies you settle in (e.g. `["USD"]`).
+3. **Set `allowedActions` and `maxAmount`.** The passport's scope is an upper bound the *agent's owner* chose; your policy is the upper bound *you* chose. Both must hold.
+4. **Pin `merchantId`.** The leaf `aud` must equal your identifier exactly — a passport minted for another merchant never verifies here.
+5. **Keep the state dir durable.** Replay protection lives in `<stateDir>/seen-jti.json`; an ephemeral state dir re-opens the replay window on every restart.
 
 ### MCP server
 
@@ -91,7 +110,7 @@ agentcred/
 └── docs/                    explainer video
 ```
 
-**`@tamtunnel/si-wallet-core`** is the audited cryptographic core, extracted verbatim from si-wallet-mcp's `lib/wallet.mjs`: Ed25519 `did:key` identities, compact EdDSA JWS, scrypt + AES-256-GCM keystore (mode 600), replay ledger, strict canonical base64url. One implementation, no forks, zero runtime dependencies. (The only addition is `signJwsWithRole`, a canonical JWS signer for revocation lists, clearly marked in-source.)
+**`@tamtunnel/si-wallet-core`** is the audited cryptographic core, extracted verbatim from si-wallet-mcp's `lib/wallet.mjs`: Ed25519 `did:key` identities, compact EdDSA JWS, scrypt + AES-256-GCM keystore (mode 600), replay ledger, strict canonical base64url. One implementation, no forks, zero runtime dependencies. (AgentCred-era additions, clearly marked in-source: `signJwsWithRole`, a canonical JWS signer for revocation lists; `normalizeCurrency` plus grant denomination and mint-time currency confinement.)
 
 **`@tamtunnel/agentcred-core`** is where the passport lives:
 
@@ -99,7 +118,7 @@ agentcred/
 - **Canonicalization** — everything signed or compared is canonicalized (sorted keys, no whitespace) before use; non-canonical encodings are rejected outright.
 - **Persistent replay store** — file-backed seen-JTI cache (`~/.agentcred/merchant/seen-jti.json`, mode 600, TTL ≥ max passport expiry, atomic check-and-mark). In-memory-only would be a replay hole after every restart.
 - **Signed revocation lists** — the issuer publishes an EdDSA-signed CRL (`{ iss, iat, exp, revoked[], seq }`); verifiers cache it on disk, pin the issuer, and never downgrade the sequence number. The cache keeps every signature-valid list's revoked JTIs regardless of list expiry — an expired list never silently un-revokes history (expiry is an enforcement-time policy, checkable via `listInfo()`). The list defaults to a 366-day lifetime so revocations outlive the longest credentials they can revoke (grants default to 365 days); shorter lifetimes emit a loud warning. Concurrent revokes serialize under a crash-safe file lock, so no revocation is ever lost.
-- **Policy checks** — `verifyPassport(passport, policy)` enforces merchant allowlists, max amounts, and max TTLs on top of the cryptographic checks.
+- **Policy checks** — `verifyPassport(passport, policy)` enforces merchant allowlists (actions, currencies), max amounts, and max TTLs on top of the cryptographic checks.
 
 **`@tamtunnel/agentcred-merchant`** wraps `verifyPassport` for web frameworks without importing them (zero runtime dependencies).
 
@@ -166,6 +185,13 @@ Issues and PRs welcome. Ground rules:
 Found a vulnerability? **Do not open a public issue.** Email the maintainer privately (see the repo's contact info) with a description and, ideally, a failing test. We aim to acknowledge within 48 hours and will credit reporters who want it.
 
 ## Changelog
+
+### Unreleased (adversarial judge-gate fixes)
+
+- **Judge BREAK-2 — currency confinement:** `mintMandate` now refuses a leaf currency the backing grant doesn't cover (a USD grant can't mint a EUR leaf; `currency_exceeded`). `issueGrant` accepts a `currency` (default `"USD"`) so grants are explicitly denominated. `VerifyPolicy` gained `allowedCurrencies: string[]` — when set, a passport in any other currency is rejected, fail closed. CLI `verify` gained `--allowed-currencies`; MCP `verify_passport` accepts `allowedCurrencies`.
+- **Judge BREAK-1 — revocation cache trust:** `revokedJtis()` and `listInfo()` now anchor trust on the *signature-verified* `payload.iss`, not the `revocation.json` file key, and require file key === `payload.iss`. A planted entry (attacker-signed CRL stored under the owner's key) is ignored instead of honored — no more selective-DoS.
+- **Judge N1 — merchant footgun:** the README merchant example now checks `result.owner` against a customer registry (self-issued passports verify `ok:true` by design) and sets `allowedCurrencies`; a new "merchant integration checklist" covers owner, currency, actions/amount/TTL, `merchantId` pinning, and state-dir durability.
+- **Judge N6 — `inspectPassport` fail-closed:** returns `{ ok: false, reason }` on garbage instead of throwing, consistent with `verifyPassport`; new `InspectPassportResult` type. CLI `inspect` exits 1 on failure.
 
 ### Unreleased (review-gate fixes)
 

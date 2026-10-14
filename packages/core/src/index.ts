@@ -22,6 +22,7 @@ export type {
   IssuedPassport,
   VerifyPolicy,
   VerifyPassportResult,
+  InspectPassportResult,
 } from "./passport.js";
 
 export { canonicalize, parseCanonical } from "./canonical.js";

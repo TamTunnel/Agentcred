@@ -432,11 +432,13 @@ export interface IssueGrantArgs {
   amountLimit: number;
   ttlDays?: number;
   note?: string;
+  /** ISO 4217 3-letter code the grant is denominated in. Default "USD". */
+  currency?: string;
 }
 
 /**
  * Owner issues an agency grant to an agent DID.
- * { agentDid, scope: string[], amountLimit, ttlDays = 365, note = "" }
+ * { agentDid, scope: string[], amountLimit, ttlDays = 365, note = "", currency = "USD" }
  */
 export function issueGrant({
   agentDid,
@@ -444,6 +446,7 @@ export function issueGrant({
   amountLimit,
   ttlDays = 365,
   note = "",
+  currency = "USD",
 }: IssueGrantArgs): {
   grant: string;
   owner: string;
@@ -474,7 +477,7 @@ export function issueGrant({
     iat,
     exp: iat + Math.floor(Number(ttlDays) * 86400),
     jti: crypto.randomUUID(),
-    claims: { scope: scopes, amount_limit: amount, currency: "USD", note },
+    claims: { scope: scopes, amount_limit: amount, currency: normalizeCurrency(currency), note },
   };
   const jws = signJws(grant, owner.privateKey, owner.did + "#key-1");
   const outPath = path.join(grantsDir(), `${grant.jti}.jwt`);
@@ -580,6 +583,18 @@ export function mintMandate({
       `amount $${amt} exceeds grant limit $${g.payload!.claims.amount_limit}`,
       "amount_exceeded"
     );
+  // Currency confinement: a grant denominated in one currency cannot mint a
+  // leaf in another. Like scope and amount, currency only narrows down the
+  // chain. Grants minted before the currency claim default to USD.
+  const leafCurrency = normalizeCurrency(currency);
+  const grantCurrency = normalizeCurrency(
+    String((g.payload!.claims.currency as string | undefined) ?? "USD")
+  );
+  if (leafCurrency !== grantCurrency)
+    throw new WalletError(
+      `currency ${leafCurrency} is not covered by the grant's currency ${grantCurrency}`,
+      "currency_exceeded"
+    );
 
   const iat = nowSec();
   const mandate = {
@@ -589,7 +604,7 @@ export function mintMandate({
     iat,
     exp: iat + Math.floor(Number(ttlSec) || 3600),
     jti: crypto.randomUUID(),
-    claims: { task, scope: scopes, amount_limit: amt, currency: normalizeCurrency(currency) },
+    claims: { task, scope: scopes, amount_limit: amt, currency: leafCurrency },
     grant: String(grantJws).trim(),
   };
   const jws = signJws(mandate, agent.privateKey, agent.did + "#key-1");

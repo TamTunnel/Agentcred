@@ -23,12 +23,34 @@ const CORE_DIST = new URL("../../core/dist/index.js", import.meta.url).href;
 
 let env: TestEnv;
 let ownerDid: string;
+let agentDid: string;
 before(() => {
   env = setupTestEnv();
   onboard("owner");
+  onboard("agent");
   ownerDid = getDid("owner").did;
+  agentDid = getDid("agent").did;
 });
 after(() => env.cleanup());
+
+/** Attacker-signed CRL: valid signature, but iss = the attacker's DID. */
+function attackerCrl(revoked: string[], seq = 1) {
+  const now = Math.floor(Date.now() / 1000);
+  return signJwsWithRole(
+    { iss: agentDid, iat: now, exp: now + 86400, revoked, seq },
+    "agent"
+  );
+}
+
+/** Plant a raw revocation.json entry, bypassing ingest()'s trust check. */
+function plantCrlEntry(dir: string, fileKey: string, jws: string) {
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, "revocation.json"),
+    JSON.stringify({ [fileKey]: { jws, fetchedAt: Math.floor(Date.now() / 1000) } }),
+    { mode: 0o600 }
+  );
+}
 
 function makeCrl(revoked: string[], seq: number, expOffset = 86400) {
   const now = Math.floor(Date.now() / 1000);
@@ -97,6 +119,47 @@ describe("RevocationCache", () => {
       })
     ).toString("base64url");
     assert.throws(() => verifyRevocationJws(`${h}.${shuffled}.${s}`), /canonical|signature/);
+  });
+});
+
+describe("planted CRL (adversarial judge BREAK-1)", () => {
+  it("revokedJtis ignores an attacker-signed CRL planted under the owner's file key", () => {
+    // PoC: attacker signs { iss: <attacker-did>, revoked: ["victim-jti"] }
+    // and plants it as { [<real-owner-did>]: { jws } } in revocation.json.
+    // Trust must come from the SIGNATURE-VERIFIED payload.iss, not the file key.
+    const dir = env.stateDir + "-planted";
+    plantCrlEntry(dir, ownerDid, attackerCrl(["victim-jti"]));
+    const cache = new RevocationCache({ dir, trustedIssuers: [ownerDid] });
+    const revoked = cache.revokedJtis((j) => verifyRevocationJws(j));
+    assert.ok(!revoked.has("victim-jti"), "planted attacker CRL must be ignored");
+  });
+
+  it("revokedJtis still honors the real owner's CRL alongside the planted entry", () => {
+    const dir = env.stateDir + "-planted-mixed";
+    plantCrlEntry(dir, ownerDid, attackerCrl(["victim-jti"]));
+    const cache = new RevocationCache({ dir, trustedIssuers: [ownerDid] });
+    // Legit owner list lands under the same file via the honest ingest path.
+    cache.ingest(makeCrl(["real-jti"], 1), (j) => verifyRevocationJws(j));
+    const revoked = cache.revokedJtis((j) => verifyRevocationJws(j));
+    assert.ok(!revoked.has("victim-jti"));
+    assert.ok(revoked.has("real-jti"));
+  });
+
+  it("listInfo rejects a file-key/payload-iss mismatch", () => {
+    const dir = env.stateDir + "-planted-info";
+    plantCrlEntry(dir, ownerDid, attackerCrl(["victim-jti"]));
+    const cache = new RevocationCache({ dir, trustedIssuers: [ownerDid] });
+    assert.equal(cache.listInfo(ownerDid, (j) => verifyRevocationJws(j)), null);
+  });
+
+  it("listInfo still reports the real owner's list", () => {
+    const dir = env.stateDir + "-info-ok";
+    const cache = new RevocationCache({ dir, trustedIssuers: [ownerDid] });
+    cache.ingest(makeCrl(["jti-a"], 7), (j) => verifyRevocationJws(j));
+    const info = cache.listInfo(ownerDid, (j) => verifyRevocationJws(j));
+    assert.ok(info);
+    assert.equal(info!.seq, 7);
+    assert.equal(info!.fresh, true);
   });
 });
 
