@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentCred — verifiable transaction passport for AI agents</title>
+<meta name="description" content="Live static demo: an AI agent issues a signed, merchant-scoped, expiring transaction passport; the merchant verifies it instead of blocking the agent.">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <h1>AgentCred</h1>
+    <p class="tag">A verifiable transaction passport for AI agents — no card numbers, no PKI, no backend in this demo.</p>
+    <p class="links"><a href="https://github.com/TamTunnel/agentcred">github.com/TamTunnel/agentcred</a></p>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="story">
+    <div class="card"><h3>1 · Agent</h3><p>Holds a mandate chain from its owner: <i>you may spend up to $100 on purchases</i>. For one checkout it mints a <b>passport</b> — merchant-scoped, 15-minute, signed.</p></div>
+    <div class="card"><h3>2 · Passport</h3><p>A canonical JSON envelope: the signed mandate chain, a canonical spend scope, and a sha256 binding the two. Pseudonymous DIDs only — <b>no PII</b>.</p></div>
+    <div class="card"><h3>3 · Merchant</h3><p>Verifies signatures, the chain, the <b>aud</b> binding, expiry, scope narrowing and replay — then approves. No agent blocklist, no card.</p></div>
+  </section>
+
+  <section class="panel">
+    <h2>Try it — live, in your browser</h2>
+    <p class="hint">Keys are generated with WebCrypto and never leave this page. The "merchant" below is just JavaScript + <code>localStorage</code> standing in for the file-backed replay store.</p>
+    <div class="btnrow">
+      <button id="issueBtn">① Issue passport (agent)</button>
+      <button id="verifyBtn">② Verify at merchant</button>
+      <button id="resetBtn" class="ghost">Reset demo</button>
+    </div>
+
+    <div id="passportBox" class="hidden">
+      <h3>Passport <span class="sub">canonical JSON — this is what travels to the merchant</span></h3>
+      <pre id="passportOut"></pre>
+      <h3>Chain</h3>
+      <div id="chainOut" class="chain"></div>
+    </div>
+
+    <div id="attackBox" class="hidden">
+      <h3>Attack it</h3>
+      <div class="btnrow">
+        <button id="replayBtn" class="warn">Replay the passport</button>
+        <button id="wrongMerchantBtn" class="warn">Present to the wrong merchant</button>
+        <button id="tamperBtn" class="warn">Tamper with the amount ($25 → $500)</button>
+        <button id="expiredBtn" class="warn">Use an expired passport</button>
+        <button id="nonCanonBtn" class="warn">Reorder the envelope keys</button>
+        <button id="restartBtn">Simulate merchant restart, then replay</button>
+      </div>
+    </div>
+
+    <div id="verifyResult" class="hidden"></div>
+  </section>
+
+  <section class="panel">
+    <h2>What the merchant checks</h2>
+    <ol class="checks">
+      <li><b>Canonical encoding</b> — the envelope must be byte-equal to its canonical form; reordered keys or extra whitespace are rejected.</li>
+      <li><b>Leaf binding</b> — <code>leaf_sha256</code> must match the mandate; the scope can't be transplanted onto another signature.</li>
+      <li><b>Merchant (<code>aud</code>) binding</b> — the passport is minted for one merchant id; anyone else rejects it.</li>
+      <li><b>Signatures</b> — Ed25519 <code>did:key</code> at every link, strict base64url throughout.</li>
+      <li><b>Scope confinement</b> — each link may only narrow: amount ≤ every ancestor's limit, child expiry ≤ parent expiry.</li>
+      <li><b>Revocation</b> — leaf and ancestor JTIs are checked against the issuer's <i>signed</i> revocation list.</li>
+      <li><b>Replay</b> — the leaf JTI is consumed in a <i>persistent</i> store (here: <code>localStorage</code>; in production: a file-backed cache that survives restarts).</li>
+    </ol>
+  </section>
+
+  <section class="panel">
+    <h2>Event log</h2>
+    <div id="log" class="log"></div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>AgentCred demo · static files only — no backend, no build-time secrets · DIDs shown are throwaway demo keys.</p>
+  </div>
+</footer>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+{
+  "description": "AgentCred — verifiable transaction passport for AI agents",
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "typescript": "^5.6.3"
+  },
+  "license": "Apache-2.0",
+  "name": "@tamtunnel/agentcred-monorepo",
+  "private": true,
+  "scripts": {
+    "build": "npm run build -w @tamtunnel/si-wallet-core && npm run build -w @tamtunnel/agentcred-core && npm run build -w @tamtunnel/agentcred-merchant && npm run build -w @tamtunnel/agentcred-mcp && npm run build -w @tamtunnel/agentcred-cli",
+    "test": "npm run build --workspaces --if-present && node --test \"packages/si-wallet-core/test/*.test.ts\" \"packages/core/test/*.test.ts\" \"packages/merchant/test/*.test.ts\" \"packages/cli/test/*.test.ts\" \"packages/mcp/test/*.test.ts\"",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "type": "module",
+  "version": "0.1.0",
+  "workspaces": [
+    "packages/*"
+  ]
+}

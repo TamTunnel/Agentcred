@@ -1,2 +1,178 @@
-# Agentcred
-A verifiable transaction passport for AI agents
+# AgentCred — a verifiable transaction passport for AI agents
+
+**[▶ Live demo](https://tamtunnel.github.io/agentcred/)** · [Explainer video](docs/agentcred-demo.mp4) · [Report a vulnerability](#security-reporting)
+
+Today, when an AI agent shows up to buy something, the merchant has two bad options: block the agent outright, or hand it a credit card number and pray. AgentCred is a third option: the agent presents a **signed, merchant-scoped, expiring passport** — a mandate chain from its owner that says *"this agent may spend up to $25 on purchases at this store for the next 15 minutes"* — and the merchant verifies the cryptography instead of trusting the agent.
+
+No card numbers change hands. No PKI, no certificate authorities, no account system. Just Ed25519 signatures, `did:key` pseudonyms, and a short list of checks any merchant can run offline.
+
+## How it works (the 30-second version)
+
+1. **Owner → agent:** You (the owner) issue your agent an *agency grant*: a signed statement like "spend up to $100 on purchases, good for 30 days."
+2. **Agent → passport:** For one checkout, the agent mints a *passport*: a short-lived (minutes), merchant-bound (`aud = merchant id`) mandate chained to that grant, wrapped in a canonical JSON envelope. Each delegation may only **narrow** the scope — less money, fewer actions, shorter expiry.
+3. **Merchant verifies:** The merchant checks the signatures, the chain, the merchant binding, the expiry, the scope narrowing, a signed revocation list, and a **persistent** replay cache — then approves the payment. Presenting the same passport twice fails, even after a merchant restart.
+
+Nothing in the passport identifies a human: parties are `did:key` pseudonyms. There is deliberately no PII to leak.
+
+## Quick start
+
+Prerequisites: Node ≥ 20.
+
+```bash
+git clone https://github.com/TamTunnel/agentcred
+cd agentcred
+npm install
+npm run build
+npm test
+```
+
+Set up identities and issue your first passport:
+
+```bash
+export SI_WALLET_PASSPHRASE="a-strong-passphrase"   # keystore encryption
+npx agentcred init                                   # owner + agent DIDs
+AGENT_DID=$(npx agentcred did --role agent | jq -r .did)
+
+# Owner grants the agent: up to $100 on purchases, 30 days
+GRANT=$(npx agentcred grant --agent-did $AGENT_DID --scope purchase --amount-limit 100 | jq -r .grant)
+echo "$GRANT" > /tmp/grant.jwt
+
+# Agent mints a passport: $25 at one merchant, 15 minutes
+npx agentcred issue --merchant merchant:acme.example.invalid \
+  --amount-limit 25 --actions purchase --grant /tmp/grant.jwt --ttl-sec 900 \
+  | tee /tmp/passport.json
+
+# Merchant verifies (exit 0 = approved, exit 1 = declined with a reason)
+npx agentcred verify --passport /tmp/passport.json --merchant merchant:acme.example.invalid
+```
+
+Verify the same file again and watch it fail closed on replay. Present it to a different `--merchant` and watch the `aud` binding bite.
+
+### Merchant integration (Node)
+
+```ts
+import { expressMiddleware } from "@tamtunnel/agentcred-merchant";
+
+app.post("/checkout",
+  expressMiddleware({
+    merchantId: "merchant:acme.example.invalid",
+    allowedActions: ["purchase"],
+    maxAmount: 50,
+    maxTtlSec: 1800,
+  }),
+  (req, res) => {
+    // req.agentcred = { agent, owner, actions, amount_limit, expires, ... }
+    res.json({ ok: true, charged: req.agentcred.amount_limit });
+  });
+```
+
+The agent sends `Authorization: Passport <canonical-json>` (or a `passport` field in the JSON body). Fastify and Hono adapters ship in the same package; the core `verifyPassport()` is pure and dependency-free.
+
+### MCP server
+
+```bash
+npx agentcred-mcp                      # stdio (default)
+AGENTCRED_MCP_TOKEN=secret npx agentcred-mcp --http --port 8787   # streamable HTTP
+```
+
+Tools: `issue_passport`, `verify_passport`, `inspect_passport`, `revoke`.
+
+## Architecture
+
+```
+agentcred/
+├── packages/
+│   ├── si-wallet-core/      @tamtunnel/si-wallet-core   — audited crypto core (zero deps)
+│   ├── core/                @tamtunnel/agentcred-core   — passports, policy, replay store, CRLs
+│   ├── merchant/            @tamtunnel/agentcred-merchant — pure verify + Express/Fastify/Hono
+│   ├── mcp/                 @tamtunnel/agentcred-mcp    — MCP server (issue/verify/revoke)
+│   └── cli/                 @tamtunnel/agentcred-cli    — `agentcred` CLI
+├── demo/                    static demo page (published to GitHub Pages)
+└── docs/                    explainer video
+```
+
+**`@tamtunnel/si-wallet-core`** is the audited cryptographic core, extracted verbatim from si-wallet-mcp's `lib/wallet.mjs`: Ed25519 `did:key` identities, compact EdDSA JWS, scrypt + AES-256-GCM keystore (mode 600), replay ledger, strict canonical base64url. One implementation, no forks, zero runtime dependencies. (The only addition is `signJwsWithRole`, a canonical JWS signer for revocation lists, clearly marked in-source.)
+
+**`@tamtunnel/agentcred-core`** is where the passport lives:
+
+- **Passport envelope** — canonical JSON: `{ leaf, leaf_sha256, spend, v }`. The leaf is a mandate JWS (`aud` = merchant id, short `exp`); `spend` is the canonical spend scope; `leaf_sha256` binds them so the scope can't be transplanted onto another signature.
+- **Canonicalization** — everything signed or compared is canonicalized (sorted keys, no whitespace) before use; non-canonical encodings are rejected outright.
+- **Persistent replay store** — file-backed seen-JTI cache (`~/.agentcred/merchant/seen-jti.json`, mode 600, TTL ≥ max passport expiry, atomic check-and-mark). In-memory-only would be a replay hole after every restart.
+- **Signed revocation lists** — the issuer publishes an EdDSA-signed CRL (`{ iss, iat, exp, revoked[], seq }`); verifiers cache it on disk, pin the issuer, refuse stale lists, and never downgrade the sequence number.
+- **Policy checks** — `verifyPassport(passport, policy)` enforces merchant allowlists, max amounts, and max TTLs on top of the cryptographic checks.
+
+**`@tamtunnel/agentcred-merchant`** wraps `verifyPassport` for web frameworks without importing them (zero runtime dependencies).
+
+### The three security decisions
+
+1. **Replay protection with merchant binding.** Every passport carries a `jti` nonce and `aud` = the merchant's identifier, with expiry measured in minutes. The merchant consumes the JTI in a *file-backed* store (TTL ≥ longest accepted expiry) — a restart doesn't reopen the hole. `aud` mismatch is a hard reject.
+2. **Scope confinement down the chain.** Each delegation may only narrow: the verifier checks amount ≤ *every* ancestor's limit, actions ⊆ ancestor scope, and child `exp` ≤ parent `exp`. The scope object is canonicalized (deterministic key ordering) before signing, and non-canonical encodings are rejected at every layer (envelope, JWS segments, CRL payloads).
+3. **Key hygiene and revocation without PKI.** Agents use ephemeral per-task keys where possible; short-lived mandates are the primary mechanism (15-minute default, 4-hour hard cap); revocation is an issuer-signed list cached by verifiers — no certificate authorities, no OCSP. Passports carry DIDs only, never PII.
+
+## Live demo
+
+**[https://tamtunnel.github.io/agentcred/](https://tamtunnel.github.io/agentcred/)** — pure static files, no backend. Issue a passport in your browser (WebCrypto Ed25519, keys never leave the page), watch the merchant verify it step by step, then attack it: replay, wrong merchant, tampered amount, expired passport, non-canonical encoding, and replay-after-merchant-restart. Every attack is blocked with the reason shown.
+
+Prefer video? [docs/agentcred-demo.mp4](docs/agentcred-demo.mp4) is a narrated screen recording of the same flow (~3 min, 1080p).
+
+## FAQs
+
+**Isn't this just a JWT with extra steps?**
+A JWT says *who you are*. A passport says *what this agent may do, where, for how long, on whose authority* — a signed, narrowing delegation chain with merchant binding, replay protection, and revocation, in one envelope a merchant can verify offline.
+
+**Why not just give the agent a virtual credit card?**
+Cards are bearer instruments: whoever holds the number can spend anywhere until you notice. A passport is scoped to one merchant, one amount, a few minutes — and it's single-use by construction.
+
+**What stops the agent copying the passport and spending twice?**
+The merchant consumes the passport's `jti` on first use in a persistent store. The second presentation fails closed — even after the merchant restarts, because the store is file-backed.
+
+**What if the owner wants to cancel mid-flight?**
+The owner signs a revocation list covering the passport's (or grant's) `jti`. Verifiers cache the list and reject anything on it. Short expiries bound the worst case anyway.
+
+**Do merchants need to call home to TamTunnel?**
+No. Verification is fully offline: signatures, chain, policy, replay store, cached CRL. There is no central server.
+
+**Where do the keys live?**
+Owner/agent keys live in an encrypted keystore (`~/.sov-id`, scrypt + AES-256-GCM, mode 600), unlocked by `SI_WALLET_PASSPHRASE`. Agents should mint ephemeral per-task keys where possible; the CLI/MCP use the wallet key for signing.
+
+**Why `did:key` instead of a username?**
+DIDs are pseudonymous and self-certifying — the identifier *is* the public key, so there's no registry to run or breach. No PII ever enters a passport.
+
+## Packages
+
+| Package | npm | Description |
+|---|---|---|
+| `@tamtunnel/si-wallet-core` | workspace-local for now | Audited crypto core, zero deps |
+| `@tamtunnel/agentcred-core` | workspace-local for now | Passport issuance/verification |
+| `@tamtunnel/agentcred-merchant` | workspace-local for now | Merchant SDK + middleware |
+| `@tamtunnel/agentcred-mcp` | workspace-local for now | MCP server |
+| `@tamtunnel/agentcred-cli` | workspace-local for now | CLI |
+
+> **Publishing note:** no npm publish credentials were available in the build environment, so all five packages are currently workspace-local (`npm install` in this repo wires them up). Publishing `@tamtunnel/si-wallet-core@0.1.0` first, then the rest, is a maintainer step — see [CHANGELOG](#changelog).
+
+## Contributing
+
+Issues and PRs welcome. Ground rules:
+
+- The crypto core (`packages/si-wallet-core`) is **audited code**: behavioral changes need a security rationale in the PR and must keep the test suite green. Don't fork it — extend at the edges.
+- New security-sensitive behavior needs tests that fail without the fix (replay, scope, aud binding, canonicalization, revocation, expiry).
+- Run `npm run build` and `npm test` before pushing. TypeScript strict, zero runtime deps in `si-wallet-core`/`core`/`merchant`.
+- Never commit realistic-looking keys, tokens, or secrets — GitHub secret scanning will block the push. Use obviously-fake placeholders (`REDACTED`, `example.invalid`).
+
+## Security reporting
+
+Found a vulnerability? **Do not open a public issue.** Email the maintainer privately (see the repo's contact info) with a description and, ideally, a failing test. We aim to acknowledge within 48 hours and will credit reporters who want it.
+
+## Changelog
+
+### 0.1.0 (2026-10-13)
+
+- Initial MVP: monorepo with `si-wallet-core`, `agentcred-core`, `agentcred-merchant`, `agentcred-mcp`, `agentcred-cli`.
+- Passport envelope (canonical JSON, `leaf` + `leaf_sha256` + `spend`), merchant `aud` binding, 15-minute default / 4-hour max TTL.
+- File-backed replay store, signed revocation lists, scope-narrowing chain validation.
+- Static demo page + narrated explainer video.
+- 68 tests green (`npm test`).
+
+## License
+
+Apache-2.0 — see [LICENSE](LICENSE).

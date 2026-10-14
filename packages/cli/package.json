@@ -1,0 +1,34 @@
+{
+  "author": "TamTunnel",
+  "bin": {
+    "agentcred": "./dist/cli.js"
+  },
+  "dependencies": {
+    "@tamtunnel/agentcred-core": "0.1.0"
+  },
+  "description": "AgentCred CLI: issue, verify, inspect and revoke transaction passports.",
+  "license": "Apache-2.0",
+  "name": "@tamtunnel/agentcred-cli",
+  "repository": {
+    "directory": "packages/cli",
+    "type": "git",
+    "url": "https://github.com/TamTunnel/agentcred"
+  },
+  "type": "module",
+  "version": "0.1.0",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  }
+}

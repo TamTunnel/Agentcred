@@ -1,0 +1,31 @@
+{
+  "author": "TamTunnel",
+  "dependencies": {
+    "@tamtunnel/si-wallet-core": "0.1.0"
+  },
+  "description": "AgentCred passport issuance and verification: canonical envelope, persistent replay store, signed revocation lists, merchant policy checks.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "license": "Apache-2.0",
+  "main": "./dist/index.js",
+  "name": "@tamtunnel/agentcred-core",
+  "repository": {
+    "directory": "packages/core",
+    "type": "git",
+    "url": "https://github.com/TamTunnel/agentcred"
+  },
+  "type": "module",
+  "version": "0.1.0",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  }
+}

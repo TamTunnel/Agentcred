@@ -1,0 +1,36 @@
+{
+  "author": "TamTunnel",
+  "bin": {
+    "agentcred-mcp": "./dist/server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.3.1",
+    "@tamtunnel/agentcred-core": "0.1.0",
+    "zod": "^4.6.7"
+  },
+  "description": "AgentCred as an MCP server: issue_passport, verify_passport and revoke tools for agent checkout flows.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "license": "Apache-2.0",
+  "main": "./dist/index.js",
+  "name": "@tamtunnel/agentcred-mcp",
+  "repository": {
+    "directory": "packages/mcp",
+    "type": "git",
+    "url": "https://github.com/TamTunnel/agentcred"
+  },
+  "type": "module",
+  "version": "0.1.0",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  }
+}

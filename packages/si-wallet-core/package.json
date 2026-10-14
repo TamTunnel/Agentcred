@@ -1,0 +1,31 @@
+{
+  "author": "TamTunnel",
+  "description": "Audited crypto core: Ed25519 did:key identities, compact EdDSA JWS mandates, scrypt+AES-256-GCM keystore, replay ledger, strict canonical base64url. Zero runtime dependencies.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "license": "Apache-2.0",
+  "main": "./dist/index.js",
+  "name": "@tamtunnel/si-wallet-core",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "directory": "packages/si-wallet-core",
+    "type": "git",
+    "url": "https://github.com/TamTunnel/agentcred"
+  },
+  "type": "module",
+  "version": "0.1.0",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  }
+}
