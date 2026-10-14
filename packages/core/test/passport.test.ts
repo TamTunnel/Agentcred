@@ -19,7 +19,7 @@ import {
   RevocationCache,
   SeenJtiStore,
   getDid,
-} from "../src/index.ts";
+} from "@tamtunnel/agentcred-core";
 import { mintMandate } from "@tamtunnel/si-wallet-core";
 
 let env: TestEnv;

@@ -8,7 +8,7 @@ import {
   signJwsWithRole,
   verifyRevocationJws,
   RevocationCache,
-} from "../src/index.ts";
+} from "@tamtunnel/agentcred-core";
 
 let env: TestEnv;
 let ownerDid: string;

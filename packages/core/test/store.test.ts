@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { setupTestEnv, type TestEnv } from "./helpers.ts";
-import { SeenJtiStore } from "../src/index.ts";
+import { SeenJtiStore } from "@tamtunnel/agentcred-core";
 
 let env: TestEnv;
 before(() => {
