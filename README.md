@@ -1,6 +1,6 @@
 # AgentCred — a verifiable transaction passport for AI agents
 
-**[▶ Live demo](https://tamtunnel.github.io/agentcred/)** · [Explainer video](docs/agentcred-demo.mp4) · [Report a vulnerability](#security-reporting)
+**[▶ Live demo](https://tamtunnel.github.io/Agentcred/)** · [Explainer video](docs/agentcred-demo.mp4) · [Report a vulnerability](#security-reporting)
 
 Today, when an AI agent shows up to buy something, the merchant has two bad options: block the agent outright, or hand it a credit card number and pray. AgentCred is a third option: the agent presents a **signed, merchant-scoped, expiring passport** — a mandate chain from its owner that says *"this agent may spend up to $25 on purchases at this store for the next 15 minutes"* — and the merchant verifies the cryptography instead of trusting the agent.
 
@@ -130,7 +130,7 @@ agentcred/
 
 ## Live demo
 
-**[https://tamtunnel.github.io/agentcred/](https://tamtunnel.github.io/agentcred/)** — pure static files, no backend. Issue a passport in your browser (WebCrypto Ed25519, keys never leave the page), watch the merchant verify it step by step, then attack it: replay, wrong merchant, tampered amount, expired passport, non-canonical encoding, and replay-after-merchant-restart. Every attack is blocked with the reason shown.
+**[https://tamtunnel.github.io/Agentcred/](https://tamtunnel.github.io/Agentcred/)** — pure static files, no backend. Issue a passport in your browser (WebCrypto Ed25519, keys never leave the page), watch the merchant verify it step by step, then attack it: replay, wrong merchant, tampered amount, expired passport, non-canonical encoding, and replay-after-merchant-restart. Every attack is blocked with the reason shown.
 
 > **Illustrative only:** the browser demo reimplements the AgentCred crypto profile from scratch in `demo/crypto.js` / `demo/app.js` — it does **not** run the audited `@tamtunnel/agentcred-core` code path, so it can drift from the packages. Treat it as a visual explainer, not a security reference.
 
