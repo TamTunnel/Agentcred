@@ -14,9 +14,9 @@
     "access": "public"
   },
   "repository": {
-    "directory": "packages/si-wallet-core",
     "type": "git",
-    "url": "https://github.com/TamTunnel/agentcred"
+    "url": "git+https://github.com/TamTunnel/agentcred.git",
+    "directory": "packages/si-wallet-core"
   },
   "type": "module",
   "version": "0.1.0",
