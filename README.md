@@ -1,6 +1,6 @@
 # AgentCred — a verifiable transaction passport for AI agents
 
-**[▶ Live demo](https://tamtunnel.github.io/Agentcred/)** · [Explainer video](docs/agentcred-demo.mp4) · [Report a vulnerability](#security-reporting)
+**[▶ Live demo](https://tamtunnel.github.io/Agentcred/)** · [Explainer video](https://tamtunnel.github.io/Agentcred/#video) · [Report a vulnerability](#security-reporting)
 
 Today, when an AI agent shows up to buy something, the merchant has two bad options: block the agent outright, or hand it a credit card number and pray. AgentCred is a third option: the agent presents a **signed, merchant-scoped, expiring passport** — a mandate chain from its owner that says *"this agent may spend up to $25 on purchases at this store for the next 15 minutes"* — and the merchant verifies the cryptography instead of trusting the agent.
 
@@ -134,7 +134,7 @@ agentcred/
 
 > **Illustrative only:** the browser demo reimplements the AgentCred crypto profile from scratch in `demo/crypto.js` / `demo/app.js` — it does **not** run the audited `@tamtunnel/agentcred-core` code path, so it can drift from the packages. Treat it as a visual explainer, not a security reference.
 
-Prefer video? [docs/agentcred-demo.mp4](docs/agentcred-demo.mp4) is a narrated screen recording of the same flow (~3 min, 1080p).
+Prefer video? [Watch the 68-second narrated explainer](https://tamtunnel.github.io/Agentcred/#video) — a screen recording of the same flow.
 
 ## FAQs
 
@@ -186,18 +186,7 @@ Found a vulnerability? **Do not open a public issue.** Email the maintainer priv
 
 ## Changelog
 
-### Unreleased (adversarial judge-gate fixes)
-
-- **Judge BREAK-2 — currency confinement:** `mintMandate` now refuses a leaf currency the backing grant doesn't cover (a USD grant can't mint a EUR leaf; `currency_exceeded`). `issueGrant` accepts a `currency` (default `"USD"`) so grants are explicitly denominated. `VerifyPolicy` gained `allowedCurrencies: string[]` — when set, a passport in any other currency is rejected, fail closed. CLI `verify` gained `--allowed-currencies`; MCP `verify_passport` accepts `allowedCurrencies`.
-- **Judge BREAK-1 — revocation cache trust:** `revokedJtis()` and `listInfo()` now anchor trust on the *signature-verified* `payload.iss`, not the `revocation.json` file key, and require file key === `payload.iss`. A planted entry (attacker-signed CRL stored under the owner's key) is ignored instead of honored — no more selective-DoS.
-- **Judge N1 — merchant footgun:** the README merchant example now checks `result.owner` against a customer registry (self-issued passports verify `ok:true` by design) and sets `allowedCurrencies`; a new "merchant integration checklist" covers owner, currency, actions/amount/TTL, `merchantId` pinning, and state-dir durability.
-- **Judge N6 — `inspectPassport` fail-closed:** returns `{ ok: false, reason }` on garbage instead of throwing, consistent with `verifyPassport`; new `InspectPassportResult` type. CLI `inspect` exits 1 on failure.
-
-### Unreleased (review-gate fixes)
-
-- **Blocker — currency binding:** `verifyPassport` now enforces `spend.currency ===` the signed leaf's currency claim (fail closed); issuance validates/normalizes currency to ISO 4217 and threads it into the signed mandate instead of hardcoding `"USD"`.
-- **Major — revocation robustness:** the CRL cache keeps signature-valid lists' JTIs regardless of list expiry (expired lists no longer silently un-revoke); list lifetime defaults to 366 days with a loud warning for shorter values; both `revoke` surfaces share one file-locked `appendRevocation()` with re-read-after-lock, so concurrent revokes never lose one.
-- **Minors:** the wallet-ledger JTI burn moved to after all verification checks pass (policy-rejected passports are re-presentable); `SeenJtiStore` uses a null-prototype object + `hasOwnProperty` (no more `"toString"` false positives, `"__proto__"` storable); file locks carry a `{ pid, ts }` stamp and are only broken when provably stale; MCP `verify_passport` accepts `trustedRevokers`; CLI `revoke` gained `--state-dir`; the browser demo is marked illustrative-only; the wallet replay ledger is lock-protected and TTL-pruned; `b64u` typing made honest.
+Everything below is live on GitHub `main`. npm publication of the packages is pending.
 
 ### 0.1.0 (2026-10-13)
 
@@ -205,7 +194,9 @@ Found a vulnerability? **Do not open a public issue.** Email the maintainer priv
 - Passport envelope (canonical JSON, `leaf` + `leaf_sha256` + `spend`), merchant `aud` binding, 15-minute default / 4-hour max TTL.
 - File-backed replay store, signed revocation lists, scope-narrowing chain validation.
 - Static demo page + narrated explainer video.
-- 68 tests green (`npm test`).
+- 103/103 tests green (`npm test`), `tsc` clean.
+- **Review-gate fixes:** currency binding enforced (`spend.currency` === the signed leaf's currency claim, fail closed); revocation robustness (expired CRLs no longer silently un-revoke; 366-day default list lifetime; single file-locked `appendRevocation()`); minors (JTI burn after all checks pass, null-prototype replay store, stale lock detection, `trustedRevokers` in MCP, `--state-dir` in CLI, illustrative-only demo marking, lock-protected wallet ledger, honest `b64u` typing).
+- **Adversarial judge-gate fixes:** currency confinement (`mintMandate` refuses a leaf currency the grant doesn't cover; `allowedCurrencies` policy); revocation cache trust anchored on signature-verified `payload.iss`; merchant-integration footgun fixed (owner registry check in the README example); `inspectPassport` fail-closed.
 
 ## License
 
