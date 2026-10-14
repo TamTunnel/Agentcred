@@ -14,9 +14,9 @@
   "main": "./dist/index.js",
   "name": "@tamtunnel/agentcred-core",
   "repository": {
-    "directory": "packages/core",
     "type": "git",
-    "url": "https://github.com/TamTunnel/agentcred"
+    "url": "git+https://github.com/TamTunnel/agentcred.git",
+    "directory": "packages/core"
   },
   "type": "module",
   "version": "0.1.0",
