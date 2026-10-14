@@ -386,3 +386,69 @@ describe("input validation", () => {
     );
   });
 });
+
+describe("currency binding (Blocker 1)", () => {
+  it("rejects a passport whose envelope currency was rewritten and re-canonicalized", () => {
+    const issued = issueTestPassport();
+    const parsed = JSON.parse(issued.passport);
+    // Attacker rewrites the unsigned envelope's currency and re-canonicalizes.
+    parsed.spend.currency = "JPY";
+    const res = verifyPassport(canonicalize(parsed), policy());
+    assert.equal(res.ok, false);
+    assert.match(res.reason || "", /currency/i);
+  });
+
+  it("normalizes currency at issuance and threads it into the signed leaf", () => {
+    const issued = issueTestPassport({ currency: "eur" });
+    const parsed = JSON.parse(issued.passport);
+    assert.equal(parsed.spend.currency, "EUR");
+    const leafPayload = JSON.parse(
+      Buffer.from(parsed.leaf.split(".")[1], "base64url").toString("utf8")
+    );
+    assert.equal(leafPayload.claims.currency, "EUR");
+    assert.equal(verifyPassport(issued.passport, policy()).ok, true);
+  });
+
+  it("rejects non-ISO-4217 currency strings at issuance", () => {
+    assert.throws(() => issueTestPassport({ currency: "USDD" }), /currency/i);
+    assert.throws(() => issueTestPassport({ currency: "12" }), /currency/i);
+    assert.throws(() => issueTestPassport({ currency: "US$" }), /currency/i);
+  });
+});
+
+describe("expiry narrowing down the chain (Minor 9)", () => {
+  it("rejects a passport whose leaf outlives its parent grant", () => {
+    // Grant lives ~30 minutes; the passport asks for 1 hour. verifyChain
+    // accepts it (the parent is not expired yet) but verifyPassport must
+    // enforce child exp <= parent exp at every hop.
+    const shortGrant = issueGrant({
+      agentDid,
+      scope: ["purchase"],
+      amountLimit: 100,
+      ttlDays: 1 / 48, // 30 minutes
+    }).grant;
+    const issued = issuePassport({
+      merchant: MERCHANT,
+      amountLimit: 25,
+      actions: ["purchase"],
+      ttlSec: 3600,
+      grantJws: shortGrant,
+    });
+    const res = verifyPassport(issued.passport, policy());
+    assert.equal(res.ok, false);
+    assert.match(res.reason || "", /expires after its parent/i);
+  });
+});
+
+describe("consumption semantics (Minor 3)", () => {
+  it("does not burn a passport rejected on merchant policy — it can be re-presented", () => {
+    const issued = issueTestPassport();
+    const denied = verifyPassport(issued.passport, policy({ maxAmount: 1 }));
+    assert.equal(denied.ok, false);
+    assert.match(denied.reason || "", /exceeds merchant policy max/);
+    // Policy fixed: the same passport now verifies — neither the merchant
+    // store nor the wallet ledger consumed it on the failed attempt.
+    const accepted = verifyPassport(issued.passport, policy());
+    assert.equal(accepted.ok, true);
+  });
+});

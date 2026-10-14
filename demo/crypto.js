@@ -1,4 +1,9 @@
-// demo/crypto.js — pure, DOM-free AgentCred crypto for the static demo.
+// demo/crypto.js — ILLUSTRATIVE ONLY. Pure, DOM-free AgentCred crypto for
+// the static demo. This is a from-scratch reimplementation of the crypto
+// profile (Ed25519 did:key, compact EdDSA JWS, canonical JSON, strict
+// base64url) for WebCrypto — it does NOT run the audited
+// @tamtunnel/agentcred-core code path and can drift from the packages.
+// Do not treat it as a security reference; see the README demo section.
 //
 // Implements the same profile as the Node packages: Ed25519 did:key
 // identities, compact EdDSA JWS, canonical JSON envelopes, strict base64url.

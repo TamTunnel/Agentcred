@@ -57,3 +57,23 @@ describe("SeenJtiStore", () => {
     assert.equal(s.checkAndMark("jti-after-corrupt", Math.floor(Date.now() / 1000) + 60), false);
   });
 });
+
+describe("SeenJtiStore prototype safety (Minor 4)", () => {
+  it("prototype-named jtis are not false positives", () => {
+    const dir = env.stateDir + "-proto";
+    const s = new SeenJtiStore({ dir });
+    const exp = Math.floor(Date.now() / 1000) + 3600;
+    // "toString" lives on Object.prototype: `in` would always report it as
+    // already seen. hasOwnProperty must not.
+    assert.equal(s.has("toString"), false);
+    assert.equal(s.checkAndMark("toString", exp), false); // first sight: not a replay
+    assert.equal(s.has("toString"), true);
+    assert.equal(s.checkAndMark("toString", exp), true); // now genuinely seen
+    assert.equal(s.checkAndMark("__proto__", exp), false);
+    assert.equal(s.checkAndMark("__proto__", exp), true);
+    // The persisted file round-trips without prototype pollution.
+    const fresh = new SeenJtiStore({ dir });
+    assert.equal(fresh.has("__proto__"), true);
+    assert.equal(fresh.has("toString"), true);
+  });
+});

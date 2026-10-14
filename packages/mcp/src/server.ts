@@ -26,10 +26,9 @@ import {
   verifyPassport,
   verifyRevocationJws,
   signJwsWithRole,
-  RevocationCache,
+  appendRevocation,
   defaultStateDir,
 } from "@tamtunnel/agentcred-core";
-import fs from "node:fs";
 
 const VERSION = "0.1.0";
 
@@ -88,14 +87,19 @@ function makeServer() {
     "verify_passport",
     {
       description:
-        "Verify an AgentCred passport against a merchant policy. Consumes the passport's " +
-        "jti in the persistent replay store on success — presenting it twice fails.",
+        "Verify an AgentCred passport against a merchant policy. Consumption semantics: " +
+        "on success the leaf jti is consumed in BOTH the merchant's persistent replay store " +
+        "and the wallet replay ledger — presenting it twice fails. On failure (bad signature, " +
+        "revocation, policy reject, replay) nothing is consumed, so a passport rejected on " +
+        "policy can be re-presented; only a successful verification burns it.",
       inputSchema: z.object({
         passport: z.string().describe("Canonical passport JSON from issue_passport"),
         merchantId: z.string().describe("This merchant's own identifier (aud binding)"),
         allowedActions: z.array(z.string()).optional(),
         maxAmount: z.number().nonnegative().optional(),
         maxTtlSec: z.number().int().positive().optional(),
+        trustedRevokers: z.array(z.string()).optional()
+          .describe("DIDs allowed to publish revocation lists (default: the passport's root owner)"),
         stateDir: z.string().optional().describe("Override for the replay/CRL state dir"),
       }),
     },
@@ -124,41 +128,31 @@ function makeServer() {
       description:
         "Owner revokes a passport (or grant) by jti: appends it to the owner's SIGNED " +
         "revocation list. Verifiers whose trustedRevokers include the owner reject the " +
-        "jti from then on. Needs SI_WALLET_PASSPHRASE and the owner identity.",
+        "jti from then on. The list defaults to a 366-day lifetime so revocations " +
+        "outlive the longest credentials they can revoke; a shorter ttlDays warns loudly. " +
+        "Needs SI_WALLET_PASSPHRASE and the owner identity.",
       inputSchema: z.object({
         jti: z.string().describe("The jti to revoke (leaf passport or ancestor grant)"),
-        ttlDays: z.number().positive().default(30)
-          .describe("How long the revocation list itself stays valid"),
+        ttlDays: z.number().positive().default(366)
+          .describe("How long the revocation list itself stays valid (default 366; shorter warns)"),
         stateDir: z.string().optional(),
       }),
     },
     wrap(async ({ jti, ttlDays, stateDir }) => {
       const owner = getDid("owner");
-      const now = Math.floor(Date.now() / 1000);
       const dir = stateDir || defaultStateDir();
-      // Merge with the cached list so revocations accumulate (seq++ wins).
-      const cache = new RevocationCache({ dir, trustedIssuers: [owner.did] });
-      const revoked = new Set<string>(cache.revokedJtis((j) => verifyRevocationJws(j)));
-      let seq = 0;
-      try {
-        const raw = JSON.parse(fs.readFileSync(`${dir}/revocation.json`, "utf8"));
-        if (raw[owner.did]) seq = verifyRevocationJws(raw[owner.did].jws).seq;
-      } catch {
-        /* no cached list yet */
-      }
-      revoked.add(jti);
-      const payload = {
-        iss: owner.did,
-        iat: now,
-        exp: now + Math.floor(ttlDays * 86400),
-        revoked: [...revoked].sort(),
-        seq: seq + 1,
-      };
-      // Signed with the owner's key through the audited core's canonical
-      // signer — raw key material never leaves the encrypted keystore.
-      const jws = signJwsWithRole(payload, "owner");
-      cache.ingest(jws, (j) => verifyRevocationJws(j));
-      return { ok: true, revoked: jti, issuer: owner.did, total: revoked.size, seq: seq + 1 };
+      // Shared, file-locked append: concurrent revokes serialize, history is
+      // merged even from expired cached lists, and seq always increases.
+      return appendRevocation({
+        dir,
+        jti,
+        ttlDays,
+        issuerDid: owner.did,
+        verifySignature: (j) => verifyRevocationJws(j),
+        // Signed with the owner's key through the audited core's canonical
+        // signer — raw key material never leaves the encrypted keystore.
+        sign: (payload) => signJwsWithRole({ ...payload }, "owner"),
+      });
     })
   );
 

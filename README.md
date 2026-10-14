@@ -10,7 +10,7 @@ No card numbers change hands. No PKI, no certificate authorities, no account sys
 
 1. **Owner → agent:** You (the owner) issue your agent an *agency grant*: a signed statement like "spend up to $100 on purchases, good for 30 days."
 2. **Agent → passport:** For one checkout, the agent mints a *passport*: a short-lived (minutes), merchant-bound (`aud = merchant id`) mandate chained to that grant, wrapped in a canonical JSON envelope. Each delegation may only **narrow** the scope — less money, fewer actions, shorter expiry.
-3. **Merchant verifies:** The merchant checks the signatures, the chain, the merchant binding, the expiry, the scope narrowing, a signed revocation list, and a **persistent** replay cache — then approves the payment. Presenting the same passport twice fails, even after a merchant restart.
+3. **Merchant verifies:** The merchant checks the signatures, the chain, the merchant binding, the currency binding (`spend.currency` must equal the signed leaf's currency), the expiry, the scope narrowing, a signed revocation list, and a **persistent** replay cache — then approves the payment. Presenting the same passport twice fails, even after a merchant restart.
 
 Nothing in the passport identifies a human: parties are `did:key` pseudonyms. There is deliberately no PII to leak.
 
@@ -95,10 +95,10 @@ agentcred/
 
 **`@tamtunnel/agentcred-core`** is where the passport lives:
 
-- **Passport envelope** — canonical JSON: `{ leaf, leaf_sha256, spend, v }`. The leaf is a mandate JWS (`aud` = merchant id, short `exp`); `spend` is the canonical spend scope; `leaf_sha256` binds them so the scope can't be transplanted onto another signature.
+- **Passport envelope** — canonical JSON: `{ leaf, leaf_sha256, spend, v }`. The leaf is a mandate JWS (`aud` = merchant id, short `exp`); `spend` is the canonical spend scope; `leaf_sha256` binds them so the scope can't be transplanted onto another signature. `spend.currency` must equal the signed leaf's currency claim (verified, fail-closed) — the unsigned envelope can't smuggle a different currency past the signature.
 - **Canonicalization** — everything signed or compared is canonicalized (sorted keys, no whitespace) before use; non-canonical encodings are rejected outright.
 - **Persistent replay store** — file-backed seen-JTI cache (`~/.agentcred/merchant/seen-jti.json`, mode 600, TTL ≥ max passport expiry, atomic check-and-mark). In-memory-only would be a replay hole after every restart.
-- **Signed revocation lists** — the issuer publishes an EdDSA-signed CRL (`{ iss, iat, exp, revoked[], seq }`); verifiers cache it on disk, pin the issuer, refuse stale lists, and never downgrade the sequence number.
+- **Signed revocation lists** — the issuer publishes an EdDSA-signed CRL (`{ iss, iat, exp, revoked[], seq }`); verifiers cache it on disk, pin the issuer, and never downgrade the sequence number. The cache keeps every signature-valid list's revoked JTIs regardless of list expiry — an expired list never silently un-revokes history (expiry is an enforcement-time policy, checkable via `listInfo()`). The list defaults to a 366-day lifetime so revocations outlive the longest credentials they can revoke (grants default to 365 days); shorter lifetimes emit a loud warning. Concurrent revokes serialize under a crash-safe file lock, so no revocation is ever lost.
 - **Policy checks** — `verifyPassport(passport, policy)` enforces merchant allowlists, max amounts, and max TTLs on top of the cryptographic checks.
 
 **`@tamtunnel/agentcred-merchant`** wraps `verifyPassport` for web frameworks without importing them (zero runtime dependencies).
@@ -113,6 +113,8 @@ agentcred/
 
 **[https://tamtunnel.github.io/agentcred/](https://tamtunnel.github.io/agentcred/)** — pure static files, no backend. Issue a passport in your browser (WebCrypto Ed25519, keys never leave the page), watch the merchant verify it step by step, then attack it: replay, wrong merchant, tampered amount, expired passport, non-canonical encoding, and replay-after-merchant-restart. Every attack is blocked with the reason shown.
 
+> **Illustrative only:** the browser demo reimplements the AgentCred crypto profile from scratch in `demo/crypto.js` / `demo/app.js` — it does **not** run the audited `@tamtunnel/agentcred-core` code path, so it can drift from the packages. Treat it as a visual explainer, not a security reference.
+
 Prefer video? [docs/agentcred-demo.mp4](docs/agentcred-demo.mp4) is a narrated screen recording of the same flow (~3 min, 1080p).
 
 ## FAQs
@@ -124,7 +126,7 @@ A JWT says *who you are*. A passport says *what this agent may do, where, for ho
 Cards are bearer instruments: whoever holds the number can spend anywhere until you notice. A passport is scoped to one merchant, one amount, a few minutes — and it's single-use by construction.
 
 **What stops the agent copying the passport and spending twice?**
-The merchant consumes the passport's `jti` on first use in a persistent store. The second presentation fails closed — even after the merchant restarts, because the store is file-backed.
+The merchant consumes the passport's `jti` on first use in a persistent store. The second presentation fails closed — even after the merchant restarts, because the store is file-backed. Consumption happens only on *successful* verification: a passport rejected on policy, revocation, or any other check is never burned and can be re-presented (e.g. after the policy is fixed).
 
 **What if the owner wants to cancel mid-flight?**
 The owner signs a revocation list covering the passport's (or grant's) `jti`. Verifiers cache the list and reject anything on it. Short expiries bound the worst case anyway.
@@ -164,6 +166,12 @@ Issues and PRs welcome. Ground rules:
 Found a vulnerability? **Do not open a public issue.** Email the maintainer privately (see the repo's contact info) with a description and, ideally, a failing test. We aim to acknowledge within 48 hours and will credit reporters who want it.
 
 ## Changelog
+
+### Unreleased (review-gate fixes)
+
+- **Blocker — currency binding:** `verifyPassport` now enforces `spend.currency ===` the signed leaf's currency claim (fail closed); issuance validates/normalizes currency to ISO 4217 and threads it into the signed mandate instead of hardcoding `"USD"`.
+- **Major — revocation robustness:** the CRL cache keeps signature-valid lists' JTIs regardless of list expiry (expired lists no longer silently un-revoke); list lifetime defaults to 366 days with a loud warning for shorter values; both `revoke` surfaces share one file-locked `appendRevocation()` with re-read-after-lock, so concurrent revokes never lose one.
+- **Minors:** the wallet-ledger JTI burn moved to after all verification checks pass (policy-rejected passports are re-presentable); `SeenJtiStore` uses a null-prototype object + `hasOwnProperty` (no more `"toString"` false positives, `"__proto__"` storable); file locks carry a `{ pid, ts }` stamp and are only broken when provably stale; MCP `verify_passport` accepts `trustedRevokers`; CLI `revoke` gained `--state-dir`; the browser demo is marked illustrative-only; the wallet replay ledger is lock-protected and TTL-pruned; `b64u` typing made honest.
 
 ### 0.1.0 (2026-10-13)
 

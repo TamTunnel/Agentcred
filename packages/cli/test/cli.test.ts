@@ -141,3 +141,25 @@ describe("agentcred CLI", () => {
     await assert.rejects(cli("bogus-command"), /Command failed/);
   });
 });
+
+describe("agentcred CLI revoke --state-dir (Minor 7)", () => {
+  it("revoke honors --state-dir and accumulates history there", async () => {
+    const customState = path.join(base, "custom-state");
+    const r1 = parseStdout(await cli("revoke", "--jti", "jti-custom-1", "--state-dir", customState));
+    assert.equal(r1.ok, true);
+    assert.equal(r1.revoked, "jti-custom-1");
+    assert.equal(r1.seq, 1);
+    assert.ok(fs.existsSync(path.join(customState, "revocation.json")));
+    // A second revoke against the same dir merges history and bumps seq.
+    const r2 = parseStdout(await cli("revoke", "--jti", "jti-custom-2", "--state-dir", customState));
+    assert.equal(r2.ok, true);
+    assert.equal(r2.seq, 2);
+    assert.equal(r2.total, 2);
+    const cached = JSON.parse(fs.readFileSync(path.join(customState, "revocation.json"), "utf8"));
+    const ownerDid = r1.issuer;
+    const payload = JSON.parse(
+      Buffer.from(cached[ownerDid].jws.split(".")[1], "base64url").toString("utf8")
+    );
+    assert.deepEqual(payload.revoked, ["jti-custom-1", "jti-custom-2"]);
+  });
+});

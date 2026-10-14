@@ -199,3 +199,128 @@ describe("verifyChain delegation", () => {
     fs.rmSync(dirB, { recursive: true, force: true });
   });
 });
+
+describe("currency threading (Blocker 1)", () => {
+  let agentDid: string;
+  let grantJws: string;
+  before(() => {
+    agentDid = getDid("agent").did;
+    grantJws = issueGrant({ agentDid, scope: ["purchase"], amountLimit: 100, ttlDays: 30 }).grant;
+  });
+
+  function leafClaims(mandate: string): Record<string, any> {
+    return JSON.parse(Buffer.from(mandate.split(".")[1], "base64url").toString("utf8")).claims;
+  }
+
+  it("mintMandate normalizes and signs the requested currency", () => {
+    const m = mintMandate({
+      audience: "merchant:x.example.invalid",
+      scope: ["purchase"],
+      amount: 10,
+      currency: "eur",
+      grantJws,
+    });
+    assert.equal(leafClaims(m.mandate).currency, "EUR");
+  });
+
+  it("mintMandate defaults currency to USD", () => {
+    const m = mintMandate({
+      audience: "merchant:x.example.invalid",
+      scope: ["purchase"],
+      amount: 10,
+      grantJws,
+    });
+    assert.equal(leafClaims(m.mandate).currency, "USD");
+  });
+
+  it("mintMandate rejects non-ISO-4217 currency strings", () => {
+    for (const bad of ["USDD", "12", "US$", ""]) {
+      assert.throws(
+        () =>
+          mintMandate({
+            audience: "merchant:x.example.invalid",
+            scope: ["purchase"],
+            amount: 10,
+            currency: bad,
+            grantJws,
+          }),
+        /currency/i,
+        `expected rejection for ${JSON.stringify(bad)}`
+      );
+    }
+  });
+});
+
+describe("verifyChain consumption control (Minor 3)", () => {
+  it("consumeLeafJti:false leaves the ledger untouched; default burns it", () => {
+    const agentDid = getDid("agent").did;
+    const grant = issueGrant({ agentDid, scope: ["purchase"], amountLimit: 100, ttlDays: 30 }).grant;
+    const mk = () =>
+      mintMandate({
+        audience: "merchant:defer.example.invalid",
+        scope: ["purchase"],
+        amount: 5,
+        ttlSec: 600,
+        grantJws: grant,
+      }).mandate;
+
+    // Deferred consumption: verifying twice is fine — nothing was burned.
+    const deferred = mk();
+    assert.equal(
+      verifyChain({ mandateJws: deferred, expectedAudience: "merchant:defer.example.invalid", consumeLeafJti: false }).ok,
+      true
+    );
+    assert.equal(
+      verifyChain({ mandateJws: deferred, expectedAudience: "merchant:defer.example.invalid", consumeLeafJti: false }).ok,
+      true
+    );
+
+    // Default: first verify burns the leaf jti, second fails as replay.
+    const burned = mk();
+    assert.equal(
+      verifyChain({ mandateJws: burned, expectedAudience: "merchant:defer.example.invalid" }).ok,
+      true
+    );
+    const again = verifyChain({ mandateJws: burned, expectedAudience: "merchant:defer.example.invalid" });
+    assert.equal(again.ok, false);
+    assert.match(again.reason || "", /replay/);
+  });
+});
+
+describe("replay ledger pruning (Minor 10)", () => {
+  it("expired ledger entries are pruned on the next mark", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const walletDir = process.env.SI_WALLET_DIR!;
+    const replayFile = path.join(walletDir, "replay.json");
+    const stale: Record<string, number> = {};
+    try {
+      Object.assign(stale, JSON.parse(fs.readFileSync(replayFile, "utf8")));
+    } catch {
+      /* no ledger yet */
+    }
+    const past = Math.floor(Date.now() / 1000) - 100;
+    stale["jti-stale-prune-me"] = past;
+    fs.writeFileSync(replayFile, JSON.stringify(stale), { mode: 0o600 });
+
+    const agentDid = getDid("agent").did;
+    const grant = issueGrant({ agentDid, scope: ["purchase"], amountLimit: 100, ttlDays: 30 }).grant;
+    const m = mintMandate({
+      audience: "merchant:prune.example.invalid",
+      scope: ["purchase"],
+      amount: 5,
+      ttlSec: 600,
+      grantJws: grant,
+    });
+    assert.equal(
+      verifyChain({ mandateJws: m.mandate, expectedAudience: "merchant:prune.example.invalid" }).ok,
+      true
+    );
+    const after = JSON.parse(fs.readFileSync(replayFile, "utf8")) as Record<string, number>;
+    assert.ok(!Object.prototype.hasOwnProperty.call(after, "jti-stale-prune-me"), "stale entry pruned");
+    const leafJti: string = JSON.parse(
+      Buffer.from(m.mandate.split(".")[1], "base64url").toString("utf8")
+    ).jti;
+    assert.ok(Object.prototype.hasOwnProperty.call(after, leafJti), "fresh mark kept");
+  });
+});

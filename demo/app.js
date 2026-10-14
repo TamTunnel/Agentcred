@@ -1,4 +1,6 @@
-// demo/app.js — DOM wiring for the static AgentCred demo.
+// demo/app.js — DOM wiring for the static AgentCred demo (ILLUSTRATIVE ONLY:
+// reimplements the crypto profile in demo/crypto.js; not the audited
+// @tamtunnel/agentcred-core code path — see README demo section).
 // Everything runs client-side: keys are ephemeral, no backend, no network.
 
 import {

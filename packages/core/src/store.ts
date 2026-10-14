@@ -11,6 +11,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { withFileLock } from "./lock.js";
 
 export function defaultStateDir(): string {
   return (
@@ -38,50 +39,27 @@ export class SeenJtiStore {
   }
 
   /**
-   * Serialize writers with an atomic lock file (O_CREAT|O_EXCL). Spins briefly;
-   * the critical section is a tiny JSON read-modify-write.
+   * Serialize writers with the shared crash-safe file lock (O_CREAT|O_EXCL
+   * plus a { pid, ts } stamp). A lock is only ever broken when provably
+   * stale — never a fresh lock, even after waiting — so two processes can't
+   * enter the critical section together on slow disk.
    */
   private withLock<T>(fn: () => T): T {
-    const deadline = Date.now() + 5000;
-    while (true) {
-      let fd: number | null = null;
-      try {
-        fd = fs.openSync(this.lockFile, "wx", 0o600);
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      }
-      if (fd !== null) {
-        try {
-          return fn();
-        } finally {
-          fs.closeSync(fd);
-          try {
-            fs.unlinkSync(this.lockFile);
-          } catch {
-            /* already gone */
-          }
-        }
-      }
-      if (Date.now() > deadline) {
-        // Stale lock (crashed holder): break it rather than deadlock.
-        try {
-          fs.unlinkSync(this.lockFile);
-        } catch {
-          /* raced */
-        }
-        continue;
-      }
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
-    }
+    return withFileLock(this.lockFile, fn);
   }
 
   private load(): Record<string, number> {
-    let data: Record<string, number> = {};
+    let raw: Record<string, number> = {};
     try {
-      data = JSON.parse(fs.readFileSync(this.file, "utf8"));
+      raw = JSON.parse(fs.readFileSync(this.file, "utf8"));
     } catch {
-      data = {};
+      raw = {};
     }
+    // Null-prototype object: "__proto__" must be storable as an ordinary
+    // key (plain-object assignment would hit the prototype setter and
+    // silently drop it), and `in` must not see Object.prototype members.
+    const data: Record<string, number> = Object.create(null);
+    for (const [jti, exp] of Object.entries(raw)) data[jti] = exp;
     const now = Math.floor(Date.now() / 1000);
     let dirty = false;
     for (const [jti, exp] of Object.entries(data)) {
@@ -103,7 +81,9 @@ export class SeenJtiStore {
 
   /** True if this jti was already consumed (replay). */
   has(jti: string): boolean {
-    return this.withLock(() => jti in this.load());
+    // hasOwnProperty, not `in`: prototype names like "toString" must not
+    // report "already seen" for a jti that was never stored.
+    return this.withLock(() => Object.prototype.hasOwnProperty.call(this.load(), jti));
   }
 
   /**
@@ -113,7 +93,7 @@ export class SeenJtiStore {
   checkAndMark(jti: string, exp: number): boolean {
     return this.withLock(() => {
       const data = this.load();
-      if (jti in data) return true;
+      if (Object.prototype.hasOwnProperty.call(data, jti)) return true;
       data[jti] = exp;
       this.save(data);
       return false;

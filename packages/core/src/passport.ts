@@ -29,6 +29,8 @@ import {
   WalletError,
   fingerprint,
   mintMandate,
+  markLeafJtiConsumed,
+  normalizeCurrency,
   unb64uStrict,
   verifyChain,
 } from "@tamtunnel/si-wallet-core";
@@ -123,12 +125,16 @@ export function issuePassport(args: IssuePassportArgs): IssuedPassport {
       "bad_args"
     );
   const sortedActions = sortedUniqueActions(actions);
+  // Currency is validated and normalized (3-letter ISO 4217, uppercase) at
+  // issuance — never accepted as a free-form string — and threaded into the
+  // signed leaf mandate, so the envelope can't carry a different one.
+  const currencyCode = normalizeCurrency(currency);
 
   // Canonical spend scope — key order is alphabetical by construction.
   const spend: SpendScope = {
     actions: sortedActions,
     amount_limit: amount,
-    currency,
+    currency: currencyCode,
     merchant,
   };
   const spendCanonical = canonicalize(spend); // throws on non-canonicalizable input
@@ -137,6 +143,7 @@ export function issuePassport(args: IssuePassportArgs): IssuedPassport {
     audience: merchant,
     scope: sortedActions,
     amount,
+    currency: currencyCode,
     ttlSec: ttl,
     task,
     grantJws,
@@ -258,7 +265,8 @@ function decodePayload(jws: string): Record<string, any> {
 /**
  * Verify a passport against a merchant policy. Enforces, in order:
  *  1. canonical envelope encoding (reject anything else),
- *  2. leaf binding (sha256) and spend↔leaf consistency,
+ *  2. leaf binding (sha256) and spend↔leaf consistency — including
+ *     spend.currency === the signed leaf's currency claim (fail closed),
  *  3. full chain signature verification via the audited verifyChain,
  *     with `aud` pinned to this merchant on the leaf,
  *  4. scope confinement down the chain: amount ≤ every ancestor's limit,
@@ -268,8 +276,12 @@ function decodePayload(jws: string): Record<string, any> {
  *  6. merchant policy: actions allowlist, max amount, max ttl,
  *  7. replay: the leaf jti is consumed in the persistent seen-jti store.
  *
- * On success the leaf jti is marked consumed; presenting the same passport
- * twice fails closed.
+ * Consumption happens only after ALL checks pass: verifyChain is told not
+ * to burn the leaf jti in the wallet ledger, and both the wallet-ledger
+ * mark and the merchant store mark happen at the very end. A passport
+ * rejected on policy or revocation is never consumed and can be
+ * re-presented (e.g. after the policy is fixed); presenting the same
+ * passport twice after success fails closed.
  */
 export function verifyPassport(
   passport: string,
@@ -290,10 +302,13 @@ export function verifyPassport(
     }
 
     // The audited chain verifier: signatures, per-hop expiry, leaf aud
-    // binding, scope⊆parent, amount≤parent, leaf replay in the wallet ledger.
+    // binding, scope⊆parent, amount≤parent. consumeLeafJti:false — the
+    // wallet-ledger burn happens only after every check below passes, so a
+    // passport rejected on policy is never consumed.
     const chained = verifyChain({
       mandateJws: envelope.leaf,
       expectedAudience: policy.merchantId,
+      consumeLeafJti: false,
     });
     if (!chained.ok) return fail("mandate chain: " + chained.reason);
 
@@ -317,6 +332,11 @@ export function verifyPassport(
       return fail("leaf aud does not match envelope spend.merchant");
     if ((leafClaims.amount_limit || 0) !== spend.amount_limit)
       return fail("leaf amount_limit does not match envelope spend scope");
+    // Currency binding: the envelope is unsigned canonical JSON, so a
+    // rewritten spend.currency would otherwise verify. The signed leaf's
+    // currency claim is the authority — mismatch fails closed.
+    if (leafClaims.currency !== spend.currency)
+      return fail("leaf currency does not match envelope spend currency");
     const leafActions = [...(leafClaims.scope || [])].sort();
     if (JSON.stringify(leafActions) !== JSON.stringify(spend.actions))
       return fail("leaf scope does not match envelope spend actions");
@@ -368,10 +388,15 @@ export function verifyPassport(
     }
 
     // Replay: persistent, file-backed, atomic check-and-mark. This is the
-    // merchant's durable line of defense; the wallet-ledger check inside
-    // verifyChain is per-wallet-dir.
-    const seen = new SeenJtiStore({ dir: stateDir });
+    // merchant's durable line of defense. Both marks happen only now, after
+    // every check above has passed — nothing is consumed on failure.
     const leafJti = String(leafPayload.jti);
+    try {
+      markLeafJtiConsumed(leafJti, Number(leafPayload.exp));
+    } catch (e) {
+      return fail("replay detected: leaf jti already seen in wallet ledger");
+    }
+    const seen = new SeenJtiStore({ dir: stateDir });
     if (seen.checkAndMark(leafJti, Number(leafPayload.exp))) {
       return fail("replay detected: passport jti already consumed");
     }

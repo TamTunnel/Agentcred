@@ -24,7 +24,7 @@ import {
   verifyPassport,
   verifyRevocationJws,
   signJwsWithRole,
-  RevocationCache,
+  appendRevocation,
   defaultStateDir,
   fingerprint,
 } from "@tamtunnel/agentcred-core";
@@ -41,7 +41,8 @@ Usage:
   agentcred verify --passport FILE|JSON --merchant ID [--max-amount N]
                    [--allowed-actions A[,A]] [--max-ttl-sec S] [--state-dir D]
   agentcred inspect --passport FILE|JSON      decode without verifying
-  agentcred revoke --jti JTI [--ttl-days D]   owner revokes a jti (signed CRL)
+  agentcred revoke --jti JTI [--ttl-days D] [--state-dir D]
+                   owner revokes a jti (signed CRL, default 366-day list)
 
 Env: SI_WALLET_PASSPHRASE (keystore), SI_WALLET_DIR (keystore dir),
      AGENTCRED_STATE_DIR (replay store + revocation cache).`);
@@ -159,30 +160,19 @@ async function main(): Promise<void> {
       }
       case "revoke": {
         const jti = need(opts, "jti");
-        const ttlDays = opts["ttl-days"] ? Number(opts["ttl-days"]) : 30;
+        const ttlDays = opts["ttl-days"] ? Number(opts["ttl-days"]) : undefined;
         const owner = getDid("owner");
-        const now = Math.floor(Date.now() / 1000);
-        const dir = defaultStateDir();
-        const cache = new RevocationCache({ dir, trustedIssuers: [owner.did] });
-        const revoked = new Set<string>(cache.revokedJtis((j) => verifyRevocationJws(j)));
-        let seq = 0;
-        try {
-          const raw = JSON.parse(fs.readFileSync(`${dir}/revocation.json`, "utf8"));
-          if (raw[owner.did]) seq = verifyRevocationJws(raw[owner.did].jws).seq;
-        } catch {
-          /* none cached */
-        }
-        revoked.add(jti);
-        const payload = {
-          iss: owner.did,
-          iat: now,
-          exp: now + Math.floor(ttlDays * 86400),
-          revoked: [...revoked].sort(),
-          seq: seq + 1,
-        };
-        const jws = signJwsWithRole(payload, "owner");
-        cache.ingest(jws, (j) => verifyRevocationJws(j));
-        out({ ok: true, revoked: jti, issuer: owner.did, issuer_fingerprint: fingerprint(owner.did), total: revoked.size, seq: seq + 1 });
+        const dir = (opts["state-dir"] as string) || defaultStateDir();
+        // Shared, file-locked append (same as the MCP revoke tool).
+        const res = appendRevocation({
+          dir,
+          jti,
+          ...(ttlDays !== undefined ? { ttlDays } : {}),
+          issuerDid: owner.did,
+          verifySignature: (j) => verifyRevocationJws(j),
+          sign: (payload) => signJwsWithRole({ ...payload }, "owner"),
+        });
+        out({ ...res, issuer_fingerprint: fingerprint(owner.did) });
         break;
       }
       default:

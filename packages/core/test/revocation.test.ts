@@ -1,6 +1,11 @@
 // packages/core/test/revocation.test.ts — signed CRL lifecycle.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { promisify } from "node:util";
 import { setupTestEnv, type TestEnv } from "./helpers.ts";
 import {
   onboard,
@@ -8,7 +13,13 @@ import {
   signJwsWithRole,
   verifyRevocationJws,
   RevocationCache,
+  appendRevocation,
 } from "@tamtunnel/agentcred-core";
+
+const run = promisify(execFile);
+// The built core dist (absolute file URL): child processes import this
+// directly so concurrent-revoke tests exercise the real shipped code.
+const CORE_DIST = new URL("../../core/dist/index.js", import.meta.url).href;
 
 let env: TestEnv;
 let ownerDid: string;
@@ -53,12 +64,19 @@ describe("RevocationCache", () => {
     );
   });
 
-  it("rejects expired lists at ingest", () => {
-    const cache = new RevocationCache({ dir: env.stateDir, trustedIssuers: [ownerDid] });
-    assert.throws(
-      () => cache.ingest(makeCrl(["x"], 9, -10), (j) => verifyRevocationJws(j)),
-      /expired/
-    );
+  it("stores signature-valid lists even when expired (storage != enforcement)", () => {
+    // Design: expiry is an enforcement-time policy, not a storage rule.
+    // Dropping an expired list silently un-revokes credentials that may
+    // still be valid, so the cache keeps the jtis; callers check freshness
+    // via listInfo().
+    const dir = env.stateDir + "-expired-store";
+    const cache = new RevocationCache({ dir, trustedIssuers: [ownerDid] });
+    const payload = cache.ingest(makeCrl(["x"], 9, -10), (j) => verifyRevocationJws(j));
+    assert.deepEqual(payload.revoked, ["x"]);
+    assert.ok(cache.revokedJtis((j) => verifyRevocationJws(j)).has("x"));
+    const info = cache.listInfo(ownerDid, (j) => verifyRevocationJws(j));
+    assert.ok(info);
+    assert.equal(info!.fresh, false);
   });
 
   it("verifyRevocationJws refuses re-encoded (non-canonical) payloads", () => {
@@ -79,5 +97,117 @@ describe("RevocationCache", () => {
       })
     ).toString("base64url");
     assert.throws(() => verifyRevocationJws(`${h}.${shuffled}.${s}`), /canonical|signature/);
+  });
+});
+
+describe("appendRevocation (Major 2)", () => {
+  function append(dir: string, jti: string, ttlDays = 366, warnings: string[] = []) {
+    return appendRevocation({
+      dir,
+      jti,
+      ttlDays,
+      issuerDid: ownerDid,
+      verifySignature: (j) => verifyRevocationJws(j),
+      sign: (p) => signJwsWithRole({ ...p }, "owner"),
+      warn: (m) => warnings.push(m),
+    });
+  }
+
+  it("CRL expiry-drop: revoking again after the list expired keeps the old jti", () => {
+    const dir = env.stateDir + "-expirydrop";
+    fs.mkdirSync(dir, { recursive: true });
+    const now = Math.floor(Date.now() / 1000);
+    // Simulate a previously cached list that has since expired.
+    const expired = signJwsWithRole(
+      { iss: ownerDid, iat: now - 100000, exp: now - 50000, revoked: ["jti-old"], seq: 1 },
+      "owner"
+    );
+    fs.writeFileSync(
+      path.join(dir, "revocation.json"),
+      JSON.stringify({ [ownerDid]: { jws: expired, fetchedAt: now - 100000 } })
+    );
+
+    const warnings: string[] = [];
+    const res = append(dir, "jti-new", 366, warnings);
+    assert.equal(res.ok, true);
+    assert.equal(res.seq, 2);
+    assert.equal(warnings.length, 0);
+
+    const cache = new RevocationCache({ dir, trustedIssuers: [ownerDid] });
+    const revoked = cache.revokedJtis((j) => verifyRevocationJws(j));
+    assert.ok(revoked.has("jti-old"), "old jti must survive list expiry");
+    assert.ok(revoked.has("jti-new"));
+  });
+
+  it("merges accumulated history across sequential revokes", () => {
+    const dir = env.stateDir + "-accumulate";
+    append(dir, "jti-1");
+    const res = append(dir, "jti-2");
+    assert.equal(res.seq, 2);
+    assert.equal(res.total, 2);
+    const cache = new RevocationCache({ dir, trustedIssuers: [ownerDid] });
+    const revoked = cache.revokedJtis((j) => verifyRevocationJws(j));
+    assert.ok(revoked.has("jti-1") && revoked.has("jti-2"));
+  });
+
+  it("warns loudly when ttlDays is shorter than the coverage minimum (366)", () => {
+    const dir = env.stateDir + "-warn";
+    const warnings: string[] = [];
+    append(dir, "jti-w", 30, warnings);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /366/);
+  });
+
+  it("validates its inputs", () => {
+    assert.throws(
+      () => append(env.stateDir + "-bad", "", 366),
+      /jti is required/
+    );
+    assert.throws(
+      () => append(env.stateDir + "-bad", "jti-x", 0),
+      /ttlDays must be a positive number/
+    );
+  });
+
+  it("concurrent revokes both land (file lock + re-read-after-lock, seq keeps increasing)", async () => {
+    const dir = env.stateDir + "-concurrent";
+    fs.mkdirSync(dir, { recursive: true });
+    // Two separate node processes race to revoke against the same dir.
+    // Without the lock + re-read, the loser would read seq 0, sign seq 1,
+    // and silently overwrite the winner — one jti lost, both reporting ok.
+    const childCode = `
+      import(${JSON.stringify(CORE_DIST)}).then(async (core) => {
+        const [dir, jti] = process.argv.slice(1);
+        const res = core.appendRevocation({
+          dir,
+          jti,
+          ttlDays: 366,
+          issuerDid: ${JSON.stringify(ownerDid)},
+          verifySignature: (j) => core.verifyRevocationJws(j),
+          sign: (p) => core.signJwsWithRole({ ...p }, "owner"),
+          warn: () => {},
+        });
+        console.log(JSON.stringify(res));
+      }).catch((e) => { console.error(e); process.exit(1); });
+    `;
+    const spawnRevoke = (jti: string) =>
+      run(process.execPath, ["--input-type=module", "-e", childCode, dir, jti], {
+        env: process.env,
+      });
+    const [r1, r2] = await Promise.all([
+      spawnRevoke("jti-race-a"),
+      spawnRevoke("jti-race-b"),
+    ]);
+    const res1 = JSON.parse(r1.stdout);
+    const res2 = JSON.parse(r2.stdout);
+    assert.equal(res1.ok, true);
+    assert.equal(res2.ok, true);
+
+    const cache = new RevocationCache({ dir, trustedIssuers: [ownerDid] });
+    const revoked = cache.revokedJtis((j) => verifyRevocationJws(j));
+    assert.ok(revoked.has("jti-race-a"), "loser's jti must not be lost");
+    assert.ok(revoked.has("jti-race-b"), "winner's jti must not be lost");
+    const info = cache.listInfo(ownerDid, (j) => verifyRevocationJws(j));
+    assert.equal(info && info.seq, 2, "seq must advance once per revoke");
   });
 });

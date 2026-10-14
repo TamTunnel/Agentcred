@@ -109,7 +109,7 @@ export function fingerprint(did: string): string {
 // ------------------------------------------------- strict base64url + JWS
 
 const b64u = (v: string | Buffer): string =>
-  Buffer.from(v as string).toString("base64url");
+  (Buffer.isBuffer(v) ? v : Buffer.from(v, "utf8")).toString("base64url");
 
 // JWS compact serialization forbids padding and requires canonical encoding
 // (unused trailing bits zero). Node's decoder is lenient, so decode,
@@ -290,6 +290,104 @@ function saveReplay(r: Record<string, number>): void {
   fs.writeFileSync(replayPath(), JSON.stringify(r), { mode: 0o600 });
 }
 
+// ------------------------------------------------- replay ledger locking
+//
+// The wallet replay ledger (SI_WALLET_DIR/replay.json) is a shared file:
+// verifyMandate/verifyChain and any concurrent verifier process must not
+// last-write-wins each other. A tiny O_CREAT|O_EXCL lock file stamped with
+// { pid, ts } serializes read-modify-write; a lock is broken only when
+// provably stale (older than 30s), never a fresh one. Entries are pruned by
+// TTL on load — a jti whose exp has passed can never be presented again
+// (expiry is checked before the ledger), so dropping it is safe and keeps
+// the file bounded.
+
+const REPLAY_LOCK_STALE_MS = 30_000;
+
+function replayLockPath(): string {
+  return path.join(stateDir(), "replay.lock");
+}
+
+function withReplayLock<T>(fn: () => T): T {
+  ensureDirs();
+  const lockFile = replayLockPath();
+  const start = Date.now();
+  while (true) {
+    let fd: number | null = null;
+    try {
+      fd = fs.openSync(lockFile, "wx", 0o600);
+      fs.writeSync(fd, JSON.stringify({ pid: process.pid, ts: Date.now() }));
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    }
+    if (fd !== null) {
+      try {
+        return fn();
+      } finally {
+        fs.closeSync(fd);
+        try {
+          fs.unlinkSync(lockFile);
+        } catch {
+          /* already gone */
+        }
+      }
+    }
+    let ageMs = Infinity;
+    try {
+      const raw = JSON.parse(fs.readFileSync(lockFile, "utf8")) as { ts?: unknown };
+      if (typeof raw?.ts === "number") ageMs = Date.now() - raw.ts;
+    } catch {
+      /* unreadable: treat as stale */
+    }
+    if (ageMs > REPLAY_LOCK_STALE_MS) {
+      try {
+        fs.unlinkSync(lockFile);
+      } catch {
+        /* raced */
+      }
+      continue;
+    }
+    if (Date.now() - start > 120_000) {
+      throw new WalletError("timed out waiting for the replay ledger lock", "lock_timeout");
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+  }
+}
+
+/** Load the ledger, dropping entries whose exp has passed (TTL pruning). */
+function loadReplayPruned(): Record<string, number> {
+  const raw = loadReplay();
+  const now = nowSec();
+  // Null-prototype: "__proto__" must be a storable ordinary key (plain-object
+  // assignment would hit the prototype setter and silently drop it).
+  const r: Record<string, number> = Object.create(null);
+  let dirty = false;
+  for (const [jti, exp] of Object.entries(raw)) {
+    if (typeof exp !== "number" || exp <= now) {
+      dirty = true;
+      continue;
+    }
+    r[jti] = exp;
+  }
+  if (dirty) saveReplay(r);
+  return r;
+}
+
+/**
+ * Consume a leaf jti in the wallet replay ledger: throws WalletError
+ * ("replay") when already present, otherwise marks it and persists.
+ * Lock-protected and TTL-pruned; the single place any caller burns a jti.
+ */
+export function markLeafJtiConsumed(jti: string, exp: number): void {
+  withReplayLock(() => {
+    const replay = loadReplayPruned();
+    if (Object.prototype.hasOwnProperty.call(replay, jti)) {
+      throw new WalletError("replay detected: leaf jti already seen", "replay");
+    }
+    replay[jti] = exp;
+    saveReplay(replay);
+  });
+}
+
 const nowSec = (): number => Math.floor(Date.now() / 1000);
 
 // ------------------------------------------------------------------- API
@@ -395,11 +493,29 @@ export interface MintMandateArgs {
   audience: string;
   scope: string[] | string;
   amount?: number;
+  /** ISO 4217 3-letter code, normalized to uppercase. Default "USD". */
+  currency?: string;
   ttlSec?: number;
   task?: string;
   grantJws: string;
   confirmOverLimit?: boolean;
   subjectDid?: string | null;
+}
+
+/**
+ * Validate + normalize a currency code: 3-letter ISO 4217, uppercase.
+ * Rejects anything else — a free-form currency string is a binding hole
+ * (see AgentCred Blocker 1: spend.currency must equal the signed leaf's).
+ */
+export function normalizeCurrency(currency: string | undefined, dflt = "USD"): string {
+  const c = String(currency ?? dflt).trim().toUpperCase();
+  if (!/^[A-Z]{3}$/.test(c)) {
+    throw new WalletError(
+      `currency must be a 3-letter ISO 4217 code, got ${JSON.stringify(String(currency))}`,
+      "bad_args"
+    );
+  }
+  return c;
 }
 
 /**
@@ -415,6 +531,7 @@ export function mintMandate({
   audience,
   scope,
   amount = 0,
+  currency = "USD",
   ttlSec = 3600,
   task = "",
   grantJws,
@@ -472,7 +589,7 @@ export function mintMandate({
     iat,
     exp: iat + Math.floor(Number(ttlSec) || 3600),
     jti: crypto.randomUUID(),
-    claims: { task, scope: scopes, amount_limit: amt, currency: "USD" },
+    claims: { task, scope: scopes, amount_limit: amt, currency: normalizeCurrency(currency) },
     grant: String(grantJws).trim(),
   };
   const jws = signJws(mandate, agent.privateKey, agent.did + "#key-1");
@@ -529,9 +646,6 @@ export function verifyMandate({
   if (expectedAudience && p.aud !== expectedAudience)
     return fail(`audience mismatch: mandate for "${p.aud}", expected "${expectedAudience}"`);
 
-  const replay = loadReplay();
-  if (replay[p.jti]) return fail("replay detected: jti already seen");
-
   if (!p.grant) return fail("task mandate carries no agency grant");
   const g = verifyJws(p.grant);
   if (!g.ok) return fail("agency grant: " + g.reason);
@@ -549,8 +663,13 @@ export function verifyMandate({
   if ((claims.amount_limit || 0) > (gclaims.amount_limit || 0))
     return fail("amount exceeds grant limit");
 
-  replay[p.jti] = p.exp;
-  saveReplay(replay);
+  // Consume the jti only after every check has passed, atomically under the
+  // ledger lock (locked read-modify-write + TTL pruning).
+  try {
+    markLeafJtiConsumed(String(p.jti), p.exp);
+  } catch (e) {
+    return fail((e as Error).message);
+  }
 
   return {
     ok: true,
@@ -605,20 +724,31 @@ export interface VerifyChainResult {
  * Replay protection applies to the presented (leaf) token only: parent
  * mandates and the root agency grant are reusable authority while valid,
  * so one long-lived grant can back many distinct task mandates.
- * { mandateJws, expectedAudience = null }
+ *
+ * Consumption semantics: by default (`consumeLeafJti: true`) the leaf jti is
+ * burned in the wallet replay ledger when — and only when — the whole chain
+ * verifies. Pass `consumeLeafJti: false` when an outer verifier (e.g.
+ * AgentCred's verifyPassport) must run further checks (revocation, merchant
+ * policy, its own replay store) first; it then calls markLeafJtiConsumed()
+ * itself only after everything passes, so a passport rejected on policy is
+ * never burned and can be re-presented.
+ * { mandateJws, expectedAudience = null, consumeLeafJti = true }
  */
 export function verifyChain({
   mandateJws,
   expectedAudience = null,
+  consumeLeafJti = true,
 }: {
   mandateJws: string;
   expectedAudience?: string | null;
+  consumeLeafJti?: boolean;
 }): VerifyChainResult {
   ensureDirs();
   const fail = (reason: string): VerifyChainResult => ({ ok: false, reason });
   const now = nowSec();
-  const replay = loadReplay();
   const chain: ChainLink[] = [];
+  let leafJti = "";
+  let leafExp = 0;
 
   let token = String(mandateJws || "").trim();
   let expectAud: string | null = expectedAudience;
@@ -634,7 +764,10 @@ export function verifyChain({
       return fail(
         `link ${depth}: audience mismatch (for "${p.aud}", expected "${expectAud}")`
       );
-    if (depth === 0 && replay[p.jti]) return fail("replay detected: leaf jti already seen");
+    if (depth === 0) {
+      leafJti = String(p.jti);
+      leafExp = p.exp;
+    }
     if (!p.grant) return fail(`link ${depth}: carries no parent grant/mandate`);
 
     const g = verifyJws(p.grant);
@@ -664,7 +797,6 @@ export function verifyChain({
       task: claims.task || "",
       expires: new Date(p.exp * 1000).toISOString(),
     });
-    if (depth === 0) replay[p.jti] = p.exp;
 
     if (gp.aud === AGENCY_AUD) {
       // Root: the owner's agency grant. Reusable authority — not consumed.
@@ -678,7 +810,16 @@ export function verifyChain({
         agency_grant: true,
         expires: new Date(gp.exp * 1000).toISOString(),
       });
-      saveReplay(replay);
+      // Burn the leaf jti only after the full chain verified — and only when
+      // the caller wants verifyChain to own consumption (verifyPassport
+      // defers it until revocation/policy/replay checks pass).
+      if (consumeLeafJti) {
+        try {
+          markLeafJtiConsumed(leafJti, leafExp);
+        } catch (e) {
+          return fail((e as Error).message);
+        }
+      }
       const leaf = chain[0];
       const root = chain[chain.length - 1];
       return {

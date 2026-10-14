@@ -29,13 +29,21 @@ export { canonicalize, parseCanonical } from "./canonical.js";
 export { SeenJtiStore, defaultStateDir } from "./store.js";
 export type { SeenJtiStoreOptions } from "./store.js";
 
+export { withFileLock, STALE_LOCK_AFTER_MS } from "./lock.js";
+export type { FileLockOptions } from "./lock.js";
+
 export {
   RevocationCache,
   signRevocationList,
+  appendRevocation,
+  DEFAULT_REVOKE_TTL_DAYS,
+  MIN_REVOKE_TTL_DAYS,
 } from "./revocation.js";
 export type {
   RevocationListPayload,
   RevocationCacheOptions,
+  AppendRevocationArgs,
+  AppendRevocationResult,
 } from "./revocation.js";
 
 // Re-export the wallet surface agents need for key management.
@@ -47,4 +55,6 @@ export {
   issueGrant,
   pairwiseDid,
   signJwsWithRole,
+  markLeafJtiConsumed,
+  normalizeCurrency,
 } from "@tamtunnel/si-wallet-core";
