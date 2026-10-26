@@ -4,7 +4,7 @@
     "agentcred": "./dist/cli.js"
   },
   "dependencies": {
-    "@tamtunnel/agentcred-core": "0.1.0"
+    "@tamtunnel/agentcred-core": "0.1.1"
   },
   "description": "AgentCred CLI: issue, verify, inspect and revoke transaction passports.",
   "license": "Apache-2.0",
@@ -15,7 +15,7 @@
     "directory": "packages/cli"
   },
   "type": "module",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {

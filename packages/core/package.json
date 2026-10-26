@@ -1,7 +1,7 @@
 {
   "author": "TamTunnel",
   "dependencies": {
-    "@tamtunnel/si-wallet-core": "0.1.0"
+    "@tamtunnel/si-wallet-core": "0.1.1"
   },
   "description": "AgentCred passport issuance and verification: canonical envelope, persistent replay store, signed revocation lists, merchant policy checks.",
   "exports": {
@@ -19,7 +19,7 @@
     "directory": "packages/core"
   },
   "type": "module",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "types": "./dist/index.d.ts",
   "files": [
     "dist/",

@@ -1,7 +1,7 @@
 {
   "author": "TamTunnel",
   "dependencies": {
-    "@tamtunnel/agentcred-core": "0.1.0"
+    "@tamtunnel/agentcred-core": "0.1.1"
   },
   "description": "Merchant SDK for AgentCred: pure verifyPassport() plus dependency-free Express/Fastify/Hono middleware.",
   "exports": {
@@ -19,7 +19,7 @@
     "directory": "packages/merchant"
   },
   "type": "module",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "types": "./dist/index.d.ts",
   "files": [
     "dist/",
