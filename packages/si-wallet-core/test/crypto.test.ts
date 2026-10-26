@@ -11,6 +11,7 @@ import {
   mintMandate,
   verifyMandate,
   verifyChain,
+  signJwsWithRole,
   pairwiseDid,
   fingerprint,
   unb64uStrict,
@@ -149,6 +150,112 @@ describe("grants and mandates", () => {
     const v = verifyMandate({ mandateJws: m.mandate });
     assert.equal(v.ok, false);
     assert.match(v.reason || "", /expired/);
+  });
+});
+
+describe("kid/issuer binding (C1)", () => {
+  const now = () => Math.floor(Date.now() / 1000);
+  function honestGrant(): string {
+    const agentDid = getDid("agent").did;
+    return issueGrant({ agentDid, scope: ["purchase"], amountLimit: 100, ttlDays: 30 }).grant;
+  }
+  function honestMandate(): string {
+    return mintMandate({
+      audience: "merchant:shop.example.invalid",
+      scope: ["purchase"],
+      amount: 20,
+      ttlSec: 600,
+      grantJws: honestGrant(),
+    }).mandate;
+  }
+
+  it("verifyMandate accepts an honest mandate (no false positive)", () => {
+    onboard("owner");
+    onboard("agent");
+    const v = verifyMandate({ mandateJws: honestMandate(), expectedAudience: "merchant:shop.example.invalid" });
+    assert.equal(v.ok, true);
+  });
+
+  it("verifyMandate rejects a mandate whose kid does not match iss", () => {
+    const victim = getDid("owner").did;
+    const iat = now();
+    // Signed with the agent's key (kid = agent DID) but claims iss = victim.
+    const forged = signJwsWithRole({
+      iss: victim,
+      sub: victim,
+      aud: "merchant:shop.example.invalid",
+      iat, exp: iat + 600, jti: "kid-binding-forged-1",
+      claims: { task: "forged", scope: ["purchase"], amount_limit: 20, currency: "USD" },
+      grant: honestGrant(),
+    }, "agent");
+    const v1 = verifyMandate({ mandateJws: forged, expectedAudience: "merchant:shop.example.invalid" });
+    assert.equal(v1.ok, false);
+    assert.match(v1.reason || "", /kid does not match/);
+    // Rejected forgery must not burn its jti: same reason twice.
+    const v2 = verifyMandate({ mandateJws: forged, expectedAudience: "merchant:shop.example.invalid" });
+    assert.equal(v2.ok, false);
+    assert.match(v2.reason || "", /kid does not match/);
+  });
+
+  it("verifyMandate rejects a grant whose kid does not match grant iss", () => {
+    const ownerDid = getDid("owner").did;
+    const agentDid = getDid("agent").did;
+    const iat = now();
+    // Grant claims iss = owner but is signed with the agent's key.
+    const forgedGrant = signJwsWithRole({
+      iss: ownerDid, sub: agentDid, aud: "sovereign-identity/agency",
+      iat, exp: iat + 86400, jti: "kid-binding-forged-grant-1",
+      claims: { scope: ["purchase"], amount_limit: 100, currency: "USD" },
+    }, "agent");
+    const mandate = signJwsWithRole({
+      iss: agentDid, sub: agentDid, aud: "merchant:shop.example.invalid",
+      iat, exp: iat + 600, jti: "kid-binding-forged-2",
+      claims: { task: "forged-grant", scope: ["purchase"], amount_limit: 20, currency: "USD" },
+      grant: forgedGrant,
+    }, "agent");
+    const v = verifyMandate({ mandateJws: mandate, expectedAudience: "merchant:shop.example.invalid" });
+    assert.equal(v.ok, false);
+    assert.match(v.reason || "", /kid does not match/);
+  });
+
+  it("verifyChain rejects a forged leaf link", () => {
+    const victim = getDid("owner").did;
+    const iat = now();
+    const forgedLeaf = signJwsWithRole({
+      iss: victim, sub: victim, aud: "merchant:shop.example.invalid",
+      iat, exp: iat + 600, jti: "kid-binding-forged-chain-1",
+      claims: { task: "forged", scope: ["purchase"], amount_limit: 20, currency: "USD" },
+      grant: honestGrant(),
+    }, "agent");
+    const res = verifyChain({ mandateJws: forgedLeaf, expectedAudience: "merchant:shop.example.invalid" });
+    assert.equal(res.ok, false);
+    assert.match(res.reason || "", /kid does not match/);
+  });
+
+  it("verifyChain rejects a forged parent grant (parent binding check)", () => {
+    onboard("owner");
+    onboard("agent");
+    const ownerDid = getDid("owner").did;
+    const agentDid = getDid("agent").did;
+    const iat = now();
+    // Parent grant claims iss = owner but is signed with the agent's key;
+    // sub is aligned to the leaf iss so kid binding is the decisive check.
+    const forgedGrant = signJwsWithRole({
+      iss: ownerDid, sub: agentDid, aud: "sovereign-identity/agency",
+      iat, exp: iat + 86400, jti: "kid-binding-forged-parent-1",
+      claims: { scope: ["purchase"], amount_limit: 100, currency: "USD" },
+    }, "agent");
+    // Leaf is honest (agent-signed, iss = agent) but carries the forged grant.
+    const leaf = mintMandate({
+      audience: "merchant:shop.example.invalid",
+      scope: ["purchase"],
+      amount: 20,
+      ttlSec: 600,
+      grantJws: forgedGrant,
+    }).mandate;
+    const res = verifyChain({ mandateJws: leaf, expectedAudience: "merchant:shop.example.invalid" });
+    assert.equal(res.ok, false);
+    assert.match(res.reason || "", /parent JWS kid does not match parent iss/);
   });
 });
 

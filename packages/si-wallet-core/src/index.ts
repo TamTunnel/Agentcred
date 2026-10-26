@@ -653,6 +653,11 @@ export function verifyMandate({
   const m = verifyJws(token);
   if (!m.ok) return fail("task mandate: " + m.reason);
   const p = m.payload!;
+  // Kid/issuer binding (C1): the signature is verified against the JWS kid's
+  // key, so the payload's iss must be that same DID — otherwise anyone can
+  // sign with their own key and claim to be any victim DID.
+  if (m.issuerDid !== p.iss)
+    return fail("task mandate JWS kid does not match mandate iss (kid/issuer binding)");
   const now = nowSec();
 
   if (typeof p.exp !== "number" || p.exp <= now) return fail("task mandate expired");
@@ -665,6 +670,8 @@ export function verifyMandate({
   const g = verifyJws(p.grant);
   if (!g.ok) return fail("agency grant: " + g.reason);
   const gp = g.payload!;
+  if (g.issuerDid !== gp.iss)
+    return fail("agency grant JWS kid does not match grant iss (kid/issuer binding)");
   if (gp.aud !== AGENCY_AUD) return fail("agency grant has wrong audience");
   if (typeof gp.exp !== "number" || gp.exp <= now) return fail("agency grant expired");
   if (gp.sub !== p.iss) return fail("agency grant was not issued to the mandate signer");
@@ -771,6 +778,8 @@ export function verifyChain({
     const m = verifyJws(token);
     if (!m.ok) return fail(`link ${depth}: ${m.reason}`);
     const p = m.payload!;
+    if (m.issuerDid !== p.iss)
+      return fail(`link ${depth}: JWS kid does not match link iss (kid/issuer binding)`);
     if (typeof p.exp !== "number" || p.exp <= now)
       return fail(`link ${depth}: expired`);
     if (typeof p.iat === "number" && p.iat > now + CLOCK_SKEW_S)
@@ -788,6 +797,8 @@ export function verifyChain({
     const g = verifyJws(p.grant);
     if (!g.ok) return fail(`link ${depth}: parent: ${g.reason}`);
     const gp = g.payload!;
+    if (g.issuerDid !== gp.iss)
+      return fail(`link ${depth}: parent JWS kid does not match parent iss (kid/issuer binding)`);
     if (typeof gp.exp !== "number" || gp.exp <= now)
       return fail(`link ${depth}: parent expired`);
     if (gp.sub !== p.iss)

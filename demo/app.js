@@ -151,6 +151,10 @@ async function verifyPassport(passportStr, merchantId, { consume = true } = {}) 
       steps.push(step("Leaf signature (Ed25519 did:key)", false, e.message));
       return fail("leaf signature invalid: " + e.message);
     }
+    if (leaf.issuerDid !== leaf.payload.iss) {
+      steps.push(step("Leaf signature (Ed25519 did:key)", false, "JWS kid does not match mandate iss (kid/issuer binding)"));
+      return fail("leaf JWS kid does not match mandate iss (kid/issuer binding)");
+    }
     steps.push(step("Leaf signature (Ed25519 did:key)", true, `iss ${shortDid(leaf.payload.iss)}`));
     const lp = leaf.payload;
     if (typeof lp.exp !== "number" || lp.exp <= now) {
@@ -188,6 +192,7 @@ async function verifyPassport(passportStr, merchantId, { consume = true } = {}) 
     }
     const gp = parent.payload;
     const chainProblems = [];
+    if (parent.issuerDid !== gp.iss) chainProblems.push("grant JWS kid does not match grant iss (kid/issuer binding)");
     if (gp.aud !== AGENCY_AUD) chainProblems.push("grant has wrong audience");
     if (typeof gp.exp !== "number" || gp.exp <= now) chainProblems.push("grant expired");
     if (gp.sub !== lp.iss) chainProblems.push("grant was not issued to the leaf signer");
